@@ -128,6 +128,70 @@ function productValues(body) {
   };
 }
 
+function makeOrderCode() {
+  return "CK-" + Date.now().toString(36).toUpperCase() +
+    "-" + randomHex(3).toUpperCase();
+}
+
+function validCustomer(body) {
+  return body &&
+    typeof body.customer_name === "string" &&
+    body.customer_name.trim().length >= 2 &&
+    body.customer_name.trim().length <= 100 &&
+    typeof body.customer_phone === "string" &&
+    body.customer_phone.trim().length >= 8 &&
+    body.customer_phone.trim().length <= 25 &&
+    typeof body.customer_address === "string" &&
+    body.customer_address.trim().length >= 3 &&
+    body.customer_address.trim().length <= 500 &&
+    (body.customer_note == null ||
+      (typeof body.customer_note === "string" &&
+       body.customer_note.length <= 1000)) &&
+    Array.isArray(body.items) &&
+    body.items.length >= 1 &&
+    body.items.length <= 50 &&
+    body.items.every(item =>
+      item &&
+      Number.isSafeInteger(Number(item.product_id)) &&
+      Number(item.product_id) > 0 &&
+      Number.isSafeInteger(Number(item.quantity)) &&
+      Number(item.quantity) >= 1 &&
+      Number(item.quantity) <= 1000
+    );
+}
+
+async function getCustomerOrder(request, env, code) {
+  const authorization = request.headers.get("Authorization") || "";
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+
+  if (!match) {
+    return { error: json({
+      success: false,
+      message: "Token akses pesanan diperlukan"
+    }, 401) };
+  }
+
+  const tokenHash = await sha256(match[1]);
+
+  const order = await env.DB.prepare(`
+    SELECT id, order_code, customer_name, customer_phone,
+           customer_address, customer_note, total_amount,
+           order_status, payment_status, rejection_reason,
+           created_at, updated_at
+    FROM orders
+    WHERE order_code = ? AND access_token_hash = ?
+  `).bind(code, tokenHash).first();
+
+  if (!order) {
+    return { error: json({
+      success: false,
+      message: "Pesanan tidak ditemukan atau token tidak valid"
+    }, 404) };
+  }
+
+  return { order };
+    }
+
 
 export default {
   async fetch(request, env) {
@@ -457,7 +521,439 @@ ORDER BY id DESC
           }
         }
       }
+            // Membuat pesanan dari katalog
+      if (path === "/api/orders" && method === "POST") {
+        const body = await readJson(request);
 
+        if (!validCustomer(body)) {
+          return json({
+            success: false,
+            message: "Data pelanggan atau daftar produk tidak valid"
+          }, 400);
+        }
+
+        // Gabungkan produk yang sama agar tidak diproses berulang.
+        const quantities = new Map();
+
+        for (const item of body.items) {
+          const id = Number(item.product_id);
+          const qty = Number(item.quantity);
+          quantities.set(id, (quantities.get(id) || 0) + qty);
+        }
+
+        const items = [];
+        let total = 0;
+
+        for (const [productId, quantity] of quantities) {
+          if (quantity > 1000) {
+            return json({
+              success: false,
+              message: "Jumlah produk terlalu banyak"
+            }, 400);
+          }
+
+          const product = await env.DB.prepare(`
+            SELECT id, name, price, stock
+            FROM products
+            WHERE id = ? AND is_active = 1
+          `).bind(productId).first();
+
+          if (!product) {
+            return json({
+              success: false,
+              message: `Produk ID ${productId} tidak tersedia`
+            }, 400);
+          }
+
+          if (product.stock < quantity) {
+            return json({
+              success: false,
+              message: `Stok ${product.name} tidak mencukupi`
+            }, 409);
+          }
+
+          const subtotal = product.price * quantity;
+
+          if (!Number.isSafeInteger(subtotal) ||
+              !Number.isSafeInteger(total + subtotal)) {
+            return json({
+              success: false,
+              message: "Total pesanan terlalu besar"
+            }, 400);
+          }
+
+          total += subtotal;
+          items.push({
+            product_id: product.id,
+            product_name: product.name,
+            unit_price: product.price,
+            quantity,
+            subtotal
+          });
+        }
+
+        const orderCode = makeOrderCode();
+        const accessToken = randomHex(32);
+        const accessTokenHash = await sha256(accessToken);
+
+        // Buat pesanan terlebih dahulu.
+        const created = await env.DB.prepare(`
+          INSERT INTO orders (
+            order_code, access_token_hash,
+            customer_name, customer_phone,
+            customer_address, customer_note,
+            total_amount, order_status, payment_status
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_payment', 'unpaid')
+        `).bind(
+          orderCode,
+          accessTokenHash,
+          body.customer_name.trim(),
+          body.customer_phone.trim(),
+          body.customer_address.trim(),
+          body.customer_note?.trim() || null,
+          total
+        ).run();
+
+        const orderId = created.meta.last_row_id;
+        const insertedItems = [];
+
+        try {
+          // Stok diperiksa dan dikurangi secara bersyarat.
+          // Jika ada kegagalan, pesanan dan perubahan stok dipulihkan.
+          for (const item of items) {
+            const stockResult = await env.DB.prepare(`
+              UPDATE products
+              SET stock = stock - ?,
+                  updated_at = datetime('now')
+              WHERE id = ? AND is_active = 1 AND stock >= ?
+            `).bind(
+              item.quantity,
+              item.product_id,
+              item.quantity
+            ).run();
+
+            if (!stockResult.meta.changes) {
+              throw new Error("STOCK_CHANGED");
+            }
+
+            insertedItems.push(item);
+
+            await env.DB.prepare(`
+              INSERT INTO order_items (
+                order_id, product_id, product_name,
+                unit_price, quantity, subtotal
+              )
+              VALUES (?, ?, ?, ?, ?, ?)
+            `).bind(
+              orderId,
+              item.product_id,
+              item.product_name,
+              item.unit_price,
+              item.quantity,
+              item.subtotal
+            ).run();
+          }
+        } catch (error) {
+          for (const item of insertedItems) {
+            await env.DB.prepare(`
+              UPDATE products
+              SET stock = stock + ?,
+                  updated_at = datetime('now')
+              WHERE id = ?
+            `).bind(item.quantity, item.product_id).run();
+          }
+
+          await env.DB.prepare(
+            "DELETE FROM orders WHERE id = ?"
+          ).bind(orderId).run();
+
+          if (error.message === "STOCK_CHANGED") {
+            return json({
+              success: false,
+              message: "Stok baru saja berubah. Silakan checkout ulang."
+            }, 409);
+          }
+
+          throw error;
+        }
+
+        return json({
+          success: true,
+          message: "Pesanan berhasil dibuat",
+          data: {
+            order_code: orderCode,
+            access_token: accessToken,
+            total_amount: total,
+            order_status: "pending_payment",
+            payment_status: "unpaid",
+            items
+          }
+        }, 201);
+      }
+
+      // Pelanggan melihat status pesanan dengan kode dan token akses.
+      const customerOrderMatch = path.match(
+        /^\/api\/orders\/([A-Za-z0-9-]+)$/
+      );
+
+      if (customerOrderMatch && method === "GET") {
+        const result = await getCustomerOrder(
+          request, env, customerOrderMatch[1]
+        );
+
+        if (result.error) return result.error;
+
+        const itemResult = await env.DB.prepare(`
+          SELECT product_name, unit_price, quantity, subtotal
+          FROM order_items
+          WHERE order_id = ?
+          ORDER BY id
+        `).bind(result.order.id).all();
+
+        return json({
+          success: true,
+          data: {
+            ...result.order,
+            items: itemResult.results
+          }
+        });
+      }
+
+          // Aksi pelanggan: lapor pembayaran atau batalkan pesanan
+      const customerActionMatch = path.match(
+        /^\/api\/orders\/([A-Za-z0-9-]+)\/(report-payment|cancel)$/
+      );
+
+      if (customerActionMatch && method === "POST") {
+        const [, code, action] = customerActionMatch;
+        const result = await getCustomerOrder(request, env, code);
+
+        if (result.error) return result.error;
+
+        const order = result.order;
+
+        if (action === "report-payment") {
+          const updated = await env.DB.prepare(`
+            UPDATE orders
+            SET order_status = 'awaiting_verification',
+                payment_status = 'reported_paid',
+                updated_at = datetime('now')
+            WHERE id = ?
+              AND order_status = 'pending_payment'
+              AND payment_status = 'unpaid'
+          `).bind(order.id).run();
+
+          if (!updated.meta.changes) {
+            return json({
+              success: false,
+              message: "Pesanan sudah diproses atau tidak dapat diubah"
+            }, 409);
+          }
+
+          return json({
+            success: true,
+            message: "Laporan pembayaran dikirim. Menunggu verifikasi kasir.",
+            order_status: "awaiting_verification",
+            payment_status: "reported_paid"
+          });
+        }
+
+        if (action === "cancel") {
+          const updated = await env.DB.prepare(`
+            UPDATE orders
+            SET order_status = 'cancelled',
+                updated_at = datetime('now')
+            WHERE id = ?
+              AND order_status = 'pending_payment'
+              AND payment_status = 'unpaid'
+          `).bind(order.id).run();
+
+          if (!updated.meta.changes) {
+            return json({
+              success: false,
+              message: "Pesanan tidak dapat dibatalkan setelah pembayaran dilaporkan"
+            }, 409);
+          }
+
+          const items = await env.DB.prepare(`
+            SELECT product_id, quantity
+            FROM order_items
+            WHERE order_id = ?
+          `).bind(order.id).all();
+
+          for (const item of items.results) {
+            if (item.product_id != null) {
+              await env.DB.prepare(`
+                UPDATE products
+                SET stock = stock + ?,
+                    updated_at = datetime('now')
+                WHERE id = ?
+              `).bind(item.quantity, item.product_id).run();
+            }
+          }
+
+          return json({
+            success: true,
+            message: "Pesanan berhasil dibatalkan",
+            order_status: "cancelled"
+          });
+        }
+      }
+
+      // Dashboard kasir: daftar pesanan
+      if (path === "/api/cashier/orders" && method === "GET") {
+        const auth = await requireCashier(request, env);
+        if (auth.error) return auth.error;
+
+        const result = await env.DB.prepare(`
+          SELECT id, order_code, customer_name, customer_phone,
+                 customer_address, customer_note, total_amount,
+                 order_status, payment_status, rejection_reason,
+                 created_at, updated_at
+          FROM orders
+          ORDER BY
+            CASE order_status
+              WHEN 'awaiting_verification' THEN 0
+              WHEN 'pending_payment' THEN 1
+              WHEN 'processing' THEN 2
+              ELSE 3
+            END,
+            created_at DESC
+          LIMIT 200
+        `).all();
+
+        return json({ success: true, data: result.results });
+      }
+
+      // Detail item pesanan untuk kasir
+      const cashierOrderItemsMatch = path.match(
+        /^\/api\/cashier\/orders\/(\d+)\/items$/
+      );
+
+      if (cashierOrderItemsMatch && method === "GET") {
+        const auth = await requireCashier(request, env);
+        if (auth.error) return auth.error;
+
+        const result = await env.DB.prepare(`
+          SELECT product_name, unit_price, quantity, subtotal
+          FROM order_items
+          WHERE order_id = ?
+          ORDER BY id
+        `).bind(Number(cashierOrderItemsMatch[1])).all();
+
+        return json({ success: true, data: result.results });
+      }
+
+      // Kasir mengonfirmasi pembayaran
+      const verifyOrderMatch = path.match(
+        /^\/api\/cashier\/orders\/(\d+)\/verify$/
+      );
+
+      if (verifyOrderMatch && method === "PATCH") {
+        const auth = await requireCashier(request, env);
+        if (auth.error) return auth.error;
+
+        const orderId = Number(verifyOrderMatch[1]);
+
+        const updated = await env.DB.prepare(`
+          UPDATE orders
+          SET order_status = 'processing',
+              payment_status = 'paid',
+              verified_by_cashier_id = ?,
+              verified_at = datetime('now'),
+              updated_at = datetime('now')
+          WHERE id = ?
+            AND order_status = 'awaiting_verification'
+            AND payment_status = 'reported_paid'
+        `).bind(auth.cashier.id, orderId).run();
+
+        if (!updated.meta.changes) {
+          return json({
+            success: false,
+            message: "Pesanan tidak ditemukan atau sudah diproses"
+          }, 409);
+        }
+
+        return json({
+          success: true,
+          message: "Pembayaran dikonfirmasi. Pesanan sedang dibuat.",
+          order_status: "processing",
+          payment_status: "paid"
+        });
+      }
+
+      // Kasir menolak pesanan dan mengembalikan stok
+      const rejectOrderMatch = path.match(
+        /^\/api\/cashier\/orders\/(\d+)\/reject$/
+      );
+
+      if (rejectOrderMatch && method === "PATCH") {
+        const auth = await requireCashier(request, env);
+        if (auth.error) return auth.error;
+
+        const body = await readJson(request);
+        const reason = body?.reason;
+
+        if (
+          typeof reason !== "string" ||
+          reason.trim().length < 3 ||
+          reason.trim().length > 500
+        ) {
+          return json({
+            success: false,
+            message: "Alasan penolakan wajib diisi (3–500 karakter)"
+          }, 400);
+        }
+
+        const orderId = Number(rejectOrderMatch[1]);
+
+        const updated = await env.DB.prepare(`
+          UPDATE orders
+          SET order_status = 'cancelled',
+              payment_status = 'failed',
+              rejection_reason = ?,
+              verified_by_cashier_id = ?,
+              verified_at = datetime('now'),
+              updated_at = datetime('now')
+          WHERE id = ?
+            AND order_status = 'awaiting_verification'
+            AND payment_status = 'reported_paid'
+        `).bind(reason.trim(), auth.cashier.id, orderId).run();
+
+        if (!updated.meta.changes) {
+          return json({
+            success: false,
+            message: "Pesanan tidak ditemukan atau sudah diproses"
+          }, 409);
+        }
+
+        const items = await env.DB.prepare(`
+          SELECT product_id, quantity
+          FROM order_items
+          WHERE order_id = ?
+        `).bind(orderId).all();
+
+        for (const item of items.results) {
+          if (item.product_id != null) {
+            await env.DB.prepare(`
+              UPDATE products
+              SET stock = stock + ?,
+                  updated_at = datetime('now')
+              WHERE id = ?
+            `).bind(item.quantity, item.product_id).run();
+          }
+        }
+
+        return json({
+          success: true,
+          message: "Pesanan ditolak. Stok dikembalikan.",
+          order_status: "cancelled",
+          payment_status: "failed",
+          rejection_reason: reason.trim()
+        });
+    }
+    
       return json({
         success: false,
         message: "Endpoint tidak ditemukan"
