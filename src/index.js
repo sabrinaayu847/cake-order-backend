@@ -95,6 +95,7 @@ async function requireCashier(request, env) {
   return { cashier };
 }
 
+
 function validProduct(body) {
   return body &&
     typeof body.name === "string" &&
@@ -107,8 +108,13 @@ function validProduct(body) {
     body.stock <= 1000000 &&
     (body.description == null || typeof body.description === "string") &&
     (body.category == null || typeof body.category === "string") &&
-    (body.image_url == null || typeof body.image_url === "string");
+    (body.image_url == null || typeof body.image_url === "string") &&
+    (body.image_data == null ||
+      (typeof body.image_data === "string" &&
+       body.image_data.length <= 1500000));
 }
+
+
 
 function productValues(body) {
   return {
@@ -116,10 +122,12 @@ function productValues(body) {
     description: body.description || "",
     price: body.price,
     image_url: body.image_url || "",
+    image_data: body.image_data || "",
     category: body.category || "",
     stock: body.stock
   };
 }
+
 
 export default {
   async fetch(request, env) {
@@ -274,10 +282,13 @@ export default {
       // Katalog publik: hanya produk aktif
       if (path === "/api/products" && method === "GET") {
         const result = await env.DB.prepare(`
-          SELECT id, name, description, price, image_url, category, stock
-          FROM products
-          WHERE is_active = 1
-          ORDER BY id DESC
+          
+SELECT id, name, description, price, image_url, image_data,
+       category, stock
+FROM products
+WHERE is_active = 1
+ORDER BY id DESC
+
         `).all();
 
         return json({ success: true, data: result.results });
@@ -288,7 +299,8 @@ export default {
 
       if (publicProductMatch && method === "GET") {
         const product = await env.DB.prepare(`
-          SELECT id, name, description, price, image_url, category, stock
+          SELECT id, name, description, price, image_url, image_data,
+       category, stock
           FROM products
           WHERE id = ? AND is_active = 1
         `).bind(Number(publicProductMatch[1])).first();
@@ -308,15 +320,17 @@ export default {
         // Daftar semua produk, termasuk yang nonaktif
         if (path === "/api/cashier/products" && method === "GET") {
           const result = await env.DB.prepare(`
-            SELECT id, name, description, price, image_url, category,
-                   stock, is_active, created_at, updated_at
-            FROM products
-            ORDER BY id DESC
+            
+SELECT id, name, description, price, image_url, image_data,
+       category, stock, is_active, created_at, updated_at
+FROM products
+ORDER BY id DESC
           `).all();
 
           return json({ success: true, data: result.results });
         }
 
+      
         // Tambah produk
         if (path === "/api/cashier/products" && method === "POST") {
           const body = await readJson(request);
@@ -332,11 +346,12 @@ export default {
 
           const result = await env.DB.prepare(`
             INSERT INTO products
-              (name, description, price, image_url, category, stock, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, 1)
+              (name, description, price, image_url, image_data,
+               category, stock, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1)
           `).bind(
             p.name, p.description, p.price,
-            p.image_url, p.category, p.stock
+            p.image_url, p.image_data, p.category, p.stock
           ).run();
 
           return json({
@@ -344,9 +359,8 @@ export default {
             message: "Produk berhasil ditambahkan",
             id: result.meta.last_row_id
           }, 201);
-        }
-
-        const productMatch = path.match(/^\/api\/cashier\/products\/(\d+)$/);
+          
+             const productMatch = path.match(/^\/api\/cashier\/products\/(\d+)$/);
 
         if (productMatch) {
           const id = Number(productMatch[1]);
@@ -366,20 +380,28 @@ export default {
 
             const result = await env.DB.prepare(`
               UPDATE products
-              SET name = ?, description = ?, price = ?, image_url = ?,
-                  category = ?, stock = ?, updated_at = datetime('now')
+              SET name = ?, description = ?, price = ?,
+                  image_url = ?, image_data = ?, category = ?,
+                  stock = ?, updated_at = datetime('now')
               WHERE id = ?
             `).bind(
               p.name, p.description, p.price,
-              p.image_url, p.category, p.stock, id
+              p.image_url, p.image_data, p.category, p.stock, id
             ).run();
 
             if (!result.meta.changes) {
-              return json({ success: false, message: "Produk tidak ditemukan" }, 404);
+              return json({
+                success: false,
+                message: "Produk tidak ditemukan"
+              }, 404);
             }
 
-            return json({ success: true, message: "Produk berhasil diperbarui" });
+            return json({
+              success: true,
+              message: "Produk berhasil diperbarui"
+            });
           }
+
 
           // Aktifkan/nonaktifkan produk
           if (method === "PATCH") {
