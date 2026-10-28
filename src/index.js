@@ -945,15 +945,15 @@ ORDER BY id DESC
           }
         }
 
-        return json({
+                return json({
           success: true,
           message: "Pesanan ditolak. Stok dikembalikan.",
           order_status: "cancelled",
           payment_status: "failed",
           rejection_reason: reason.trim()
         });
-    }
-    
+      }
+
       return json({
         success: false,
         message: "Endpoint tidak ditemukan"
