@@ -1,0 +1,8 @@
+name = "cake-order-backend"
+main = "src/index.js"
+compatibility_date = "2026-10-28"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cake-order-db"
+database_id = "ISI_DATABASE_ID_KAMU"
