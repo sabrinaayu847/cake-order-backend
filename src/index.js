@@ -598,22 +598,22 @@ ORDER BY id DESC
 
         // Buat pesanan terlebih dahulu.
         const created = await env.DB.prepare(`
-          INSERT INTO orders (
-            order_code, access_token_hash,
-            customer_name, customer_phone,
-            customer_address, customer_note,
-            total_amount, order_status, payment_status
-          )
-          VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_payment', 'unpaid')
-        `).bind(
-          orderCode,
-          accessTokenHash,
-          body.customer_name.trim(),
-          body.customer_phone.trim(),
-          body.customer_address.trim(),
-          body.customer_note?.trim() || null,
-          total
-        ).run();
+  INSERT INTO orders (
+    order_code, access_token_hash,
+    customer_name, customer_phone,
+    customer_address, customer_note,
+    total_amount, order_status, payment_status
+  )
+  VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_payment', 'unpaid')
+`).bind(
+  orderCode,
+  accessTokenHash,
+  body.customer_name.trim(),
+  body.customer_phone.trim(),
+  body.customer_address.trim(),
+  body.customer_note?.trim() || null,
+  total
+).run();
 
         const orderId = created.meta.last_row_id;
         const insertedItems = [];
@@ -954,6 +954,91 @@ ORDER BY id DESC
         });
       }
 
+      
+      // Batalkan pesanan dari dashboard kasir
+      const cashierCancelMatch = path.match(
+        /^\/api\/cashier\/orders\/(\d+)\/cancel$/
+      );
+
+      if (cashierCancelMatch && method === "POST") {
+        const auth = await requireCashier(request, env);
+        if (auth.error) return auth.error;
+
+        const orderId = Number(cashierCancelMatch[1]);
+
+        const order = await env.DB.prepare(`
+          SELECT id, order_status, payment_status
+          FROM orders
+          WHERE id = ?
+        `).bind(orderId).first();
+
+        if (!order) {
+          return json({
+            success: false,
+            message: "Pesanan tidak ditemukan"
+          }, 404);
+        }
+
+        const allowed =
+          (order.order_status === "pending_payment" &&
+           order.payment_status === "unpaid") ||
+          (order.order_status === "awaiting_verification" &&
+           order.payment_status === "reported_paid");
+
+        if (!allowed) {
+          return json({
+            success: false,
+            message: "Pesanan tidak dapat dibatalkan karena sudah diproses"
+          }, 409);
+        }
+
+        const updated = await env.DB.prepare(`
+          UPDATE orders
+          SET order_status = 'cancelled',
+              updated_at = datetime('now')
+          WHERE id = ?
+            AND (
+              (order_status = 'pending_payment'
+               AND payment_status = 'unpaid')
+              OR
+              (order_status = 'awaiting_verification'
+               AND payment_status = 'reported_paid')
+            )
+        `).bind(orderId).run();
+
+        if (!updated.meta.changes) {
+          return json({
+            success: false,
+            message: "Status pesanan sudah berubah. Muat ulang halaman."
+          }, 409);
+        }
+
+        const items = await env.DB.prepare(`
+          SELECT product_id, quantity
+          FROM order_items
+          WHERE order_id = ?
+        `).bind(orderId).all();
+
+        for (const item of items.results) {
+          if (item.product_id != null) {
+            await env.DB.prepare(`
+              UPDATE products
+              SET stock = stock + ?,
+                  updated_at = datetime('now')
+              WHERE id = ?
+            `).bind(item.quantity, item.product_id).run();
+          }
+        }
+
+        return json({
+          success: true,
+          message: "Pesanan berhasil dibatalkan",
+          order_status: "cancelled",
+          refund_review_required:
+            order.payment_status === "reported_paid"
+        });
+                }
+      
       return json({
         success: false,
         message: "Endpoint tidak ditemukan"
