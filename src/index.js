@@ -1080,65 +1080,61 @@ return json({
 }
 
       // Kasir mengubah status pesanan menjadi sedang diantar atau selesai
-      const updateOrderStatusMatch = path.match(
-        /^\/api\/cashier\/orders\/(\d+)\/status$/
-      );
+      
+const updateOrderStatusMatch = path.match(
+  /^\/api\/cashier\/orders\/(\d+)\/status$/
+);
 
-      if (updateOrderStatusMatch && method === "PATCH") {
-        const auth = await requireCashier(request, env);
-        if (auth.error) return auth.error;
+if (updateOrderStatusMatch && method === "PATCH") {
+  const auth = await requireCashier(request, env);
+  if (auth.error) return auth.error;
 
-        const orderId = Number(updateOrderStatusMatch[1]);
-        const body = await readJson(request);
-        const newStatus = body?.order_status;
+  const orderId = Number(updateOrderStatusMatch[1]);
+  const body = await readJson(request);
+  const newStatus = body?.order_status;
 
-        const transitions = {
-          delivering: {
-            from: "processing",
-            message: "Pesanan sekarang sedang diantar."
-          },
-          completed: {
-            from: "delivering",
-            message: "Pesanan berhasil diselesaikan."
-          }
-        };
+  const transitions = {
+    delivering: "processing",
+    completed: "delivering"
+  };
 
-        const transition = transitions[newStatus];
+  const previousStatus = transitions[newStatus];
 
-        if (!transition) {
-          return json({
-            success: false,
-            message: "Status tujuan tidak valid."
-          }, 400);
-        }
+  if (!previousStatus) {
+    return json({
+      success: false,
+      message: "Status tujuan tidak valid."
+    }, 400);
+  }
 
-        const updated = await env.DB.prepare(`
-          UPDATE orders
-          SET order_status = ?,
-              updated_at = datetime('now')
-          WHERE id = ?
-            AND order_status = ?
-            AND payment_status = 'paid'
-        `).bind(
-          newStatus,
-          orderId,
-          transition.from
-        ).run();
+  const result = await env.DB.prepare(`
+    UPDATE orders
+    SET order_status = ?,
+        updated_at = datetime('now')
+    WHERE id = ?
+      AND order_status = ?
+      AND payment_status = 'paid'
+  `).bind(
+    newStatus,
+    orderId,
+    previousStatus
+  ).run();
 
-        if (!updated.meta.changes) {
-          return json({
-            success: false,
-            message:
-              "Status pesanan tidak sesuai. Muat ulang halaman dan periksa status terbaru."
-          }, 409);
-        }
+  if (!result.meta.changes) {
+    return json({
+      success: false,
+      message: "Status pesanan tidak sesuai atau pesanan tidak ditemukan."
+    }, 409);
+  }
 
-        return json({
-          success: true,
-          message: transition.message,
-          order_status: newStatus
-        });
-      }
+  return json({
+    success: true,
+    message: newStatus === "delivering"
+      ? "Pesanan sekarang sedang diantar."
+      : "Pesanan berhasil diselesaikan.",
+    order_status: newStatus
+  });
+    }
       
 // Endpoint tidak ditemukan
 return json({
