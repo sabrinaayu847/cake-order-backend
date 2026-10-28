@@ -192,6 +192,126 @@ async function getCustomerOrder(request, env, code) {
   return { order };
     }
 
+async function cancelOrderAndRestoreStock(env, {
+  orderId,
+  allowedStatuses,
+  paymentStatus,
+  rejectionReason,
+  cashierId
+}) {
+  const order = await env.DB.prepare(`
+    SELECT id, order_status, payment_status, stock_restored_at
+    FROM orders
+    WHERE id = ?
+  `).bind(orderId).first();
+
+  if (!order) {
+    return {
+      ok: false,
+      status: 404,
+      message: "Pesanan tidak ditemukan"
+    };
+  }
+
+  if (order.stock_restored_at != null) {
+  return {
+    ok: false,
+    status: 409,
+    message: "Stok pesanan sudah pernah dikembalikan"
+  };
+  }
+
+  const allowed = allowedStatuses.some(
+    status =>
+      order.order_status === status.order_status &&
+      order.payment_status === status.payment_status
+  );
+
+  if (!allowed) {
+    return {
+      ok: false,
+      status: 409,
+      message: "Pesanan sudah diproses atau tidak dapat dibatalkan"
+    };
+  }
+
+  const itemsResult = await env.DB.prepare(`
+    SELECT product_id, quantity
+    FROM order_items
+    WHERE order_id = ?
+  `).bind(orderId).all();
+
+  // Kunci unik agar pengembalian stok tidak dapat dijalankan ulang.
+  const restoreKey = `${Date.now()}-${randomHex(16)}`;
+
+  const updateOrder = env.DB.prepare(`
+    UPDATE orders
+    SET order_status = 'cancelled',
+        payment_status = COALESCE(?, payment_status),
+        rejection_reason = COALESCE(?, rejection_reason),
+        verified_by_cashier_id = COALESCE(?, verified_by_cashier_id),
+        verified_at = CASE
+          WHEN ? IS NOT NULL THEN datetime('now')
+          ELSE verified_at
+        END,
+        stock_restored_at = ?,
+        updated_at = datetime('now')
+    WHERE id = ?
+      AND stock_restored_at IS NULL
+      AND order_status = ?
+      AND payment_status = ?
+  `).bind(
+    paymentStatus ?? null,
+    rejectionReason ?? null,
+    cashierId ?? null,
+    rejectionReason ?? null,
+    restoreKey,
+    orderId,
+    order.order_status,
+    order.payment_status
+  );
+
+  const statements = [updateOrder];
+
+  for (const item of itemsResult.results) {
+    if (item.product_id != null) {
+      statements.push(
+        env.DB.prepare(`
+          UPDATE products
+          SET stock = stock + ?,
+              updated_at = datetime('now')
+          WHERE id = ?
+            AND EXISTS (
+              SELECT 1 FROM orders
+              WHERE id = ?
+                AND stock_restored_at = ?
+                AND order_status = 'cancelled'
+            )
+        `).bind(
+          item.quantity,
+          item.product_id,
+          orderId,
+          restoreKey
+        )
+      );
+    }
+  }
+
+  const results = await env.DB.batch(statements);
+
+  if (!results[0].meta.changes) {
+    return {
+      ok: false,
+      status: 409,
+      message: "Status pesanan berubah. Muat ulang halaman."
+    };
+  }
+
+  return {
+    ok: true,
+    message: "Pesanan dibatalkan dan stok dikembalikan"
+  };
+}
 
 export default {
   async fetch(request, env) {
@@ -908,25 +1028,31 @@ ORDER BY id DESC
 
         const orderId = Number(rejectOrderMatch[1]);
 
-        const updated = await env.DB.prepare(`
-          UPDATE orders
-          SET order_status = 'cancelled',
-              payment_status = 'failed',
-              rejection_reason = ?,
-              verified_by_cashier_id = ?,
-              verified_at = datetime('now'),
-              updated_at = datetime('now')
-          WHERE id = ?
-            AND order_status = 'awaiting_verification'
-            AND payment_status = 'reported_paid'
-        `).bind(reason.trim(), auth.cashier.id, orderId).run();
+const result = await cancelOrderAndRestoreStock(env, {
+  orderId,
+  allowedStatuses: [{
+    order_status: "awaiting_verification",
+    payment_status: "reported_paid"
+  }],
+  paymentStatus: "failed",
+  rejectionReason: reason.trim(),
+  cashierId: auth.cashier.id
+});
 
-        if (!updated.meta.changes) {
-          return json({
-            success: false,
-            message: "Pesanan tidak ditemukan atau sudah diproses"
-          }, 409);
-        }
+if (!result.ok) {
+  return json({
+    success: false,
+    message: result.message
+  }, result.status);
+}
+
+return json({
+  success: true,
+  message: "Pesanan ditolak. Stok dikembalikan.",
+  order_status: "cancelled",
+  payment_status: "failed",
+  rejection_reason: reason.trim()
+});
 
         const items = await env.DB.prepare(`
           SELECT product_id, quantity
@@ -966,90 +1092,48 @@ ORDER BY id DESC
 
         const orderId = Number(cashierCancelMatch[1]);
 
-        const order = await env.DB.prepare(`
-          SELECT id, order_status, payment_status
-          FROM orders
-          WHERE id = ?
-        `).bind(orderId).first();
-
-        if (!order) {
-          return json({
-            success: false,
-            message: "Pesanan tidak ditemukan"
-          }, 404);
-        }
-
-        const allowed =
-          (order.order_status === "pending_payment" &&
-           order.payment_status === "unpaid") ||
-          (order.order_status === "awaiting_verification" &&
-           order.payment_status === "reported_paid");
-
-        if (!allowed) {
-          return json({
-            success: false,
-            message: "Pesanan tidak dapat dibatalkan karena sudah diproses"
-          }, 409);
-        }
-
-        const updated = await env.DB.prepare(`
-          UPDATE orders
-          SET order_status = 'cancelled',
-              updated_at = datetime('now')
-          WHERE id = ?
-            AND (
-              (order_status = 'pending_payment'
-               AND payment_status = 'unpaid')
-              OR
-              (order_status = 'awaiting_verification'
-               AND payment_status = 'reported_paid')
-            )
-        `).bind(orderId).run();
-
-        if (!updated.meta.changes) {
-          return json({
-            success: false,
-            message: "Status pesanan sudah berubah. Muat ulang halaman."
-          }, 409);
-        }
-
-        const items = await env.DB.prepare(`
-          SELECT product_id, quantity
-          FROM order_items
-          WHERE order_id = ?
-        `).bind(orderId).all();
-
-        for (const item of items.results) {
-          if (item.product_id != null) {
-            await env.DB.prepare(`
-              UPDATE products
-              SET stock = stock + ?,
-                  updated_at = datetime('now')
-              WHERE id = ?
-            `).bind(item.quantity, item.product_id).run();
-          }
-        }
-
-        return json({
-          success: true,
-          message: "Pesanan berhasil dibatalkan",
-          order_status: "cancelled",
-          refund_review_required:
-            order.payment_status === "reported_paid"
-        });
-                }
-      
-      return json({
-        success: false,
-        message: "Endpoint tidak ditemukan"
-      }, 404);
-    } catch (error) {
-      console.error("API error:", error);
-
-      return json({
-        success: false,
-        message: "Terjadi kesalahan pada server. Periksa log Worker."
-      }, 500);
+const result = await cancelOrderAndRestoreStock(env, {
+  orderId,
+  allowedStatuses: [
+    {
+      order_status: "pending_payment",
+      payment_status: "unpaid"
+    },
+    {
+      order_status: "awaiting_verification",
+      payment_status: "reported_paid"
     }
-  }
+  ]
+});
+
+if (!result.ok) {
+  return json({
+    success: false,
+    message: result.message
+  }, result.status);
+}
+
+return json({
+  success: true,
+  message: result.message,
+  order_status: "cancelled",
+  refund_review_required: true
+});
+}
+
+// Endpoint tidak ditemukan
+return json({
+  success: false,
+  message: "Endpoint tidak ditemukan"
+}, 404);
+
+} catch (error) {
+  console.error("API error:", error);
+
+  return json({
+    success: false,
+    message: "Terjadi kesalahan pada server. Periksa log Worker."
+  }, 500);
+}
+}
 };
