@@ -354,13 +354,15 @@ ORDER BY id DESC
             p.image_url, p.image_data, p.category, p.stock
           ).run();
 
+          
           return json({
             success: true,
             message: "Produk berhasil ditambahkan",
             id: result.meta.last_row_id
           }, 201);
-          
-             const productMatch = path.match(/^\/api\/cashier\/products\/(\d+)$/);
+        }
+
+        const productMatch = path.match(/^\/api\/cashier\/products\/(\d+)$/);
 
         if (productMatch) {
           const id = Number(productMatch[1]);
