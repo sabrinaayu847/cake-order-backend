@@ -5,4 +5,4 @@ compatibility_date = "2026-10-28"
 [[d1_databases]]
 binding = "DB"
 database_name = "cake-order-db"
-database_id = "ISI_DATABASE_ID_KAMU"
+database_id = "f44477d4-bf31-478a-8384-2a4f5c18f354"
