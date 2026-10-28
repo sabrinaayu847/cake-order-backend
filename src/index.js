@@ -988,7 +988,7 @@ ORDER BY id DESC
 
       // Kasir menolak pesanan dan mengembalikan stok
       const rejectOrderMatch = path.match(
-        /^\\/api\\/cashier\\/orders\\/(\\d+)\\/reject$/
+        /^\/api\/cashier\/orders\/(\d+)\/reject$/
       );
 
       if (rejectOrderMatch && method === "PATCH") {
