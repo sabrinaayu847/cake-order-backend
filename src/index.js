@@ -1290,59 +1290,63 @@ async function cancelOrderAndRestoreStock(env, {
           completed: "delivering"
         };
 
-        const previousStatus = transitions[newStatus];
+       
+      const previousStatus = transitions[newStatus];
 
-        if (!previousStatus) {
-          return json({
-            success: false,
-            message: "Status tujuan tidak valid."
-          }, 400);
-        }
-
-        const result = await env.DB.prepare(`
-          UPDATE orders
-          SET order_status = ?,
-              updated_at = datetime('now')
-          WHERE id = ?
-            AND order_status = ?
-            AND payment_status = 'paid'
-        `).bind(
-          newStatus,
-          orderId,
-          previousStatus
-        ).run();
-
-        if (!result.meta.changes) {
-          return json({
-            success: false,
-            message:
-              "Status pesanan tidak sesuai atau pesanan tidak ditemukan."
-          }, 409);
-        }
-
+      if (!previousStatus) {
         return json({
-          success: true,
-          message: newStatus === "delivering"
-            ? "Pesanan sekarang sedang diantar."
-            : "Pesanan berhasil diselesaikan.",
-          order_status: newStatus
-        });
+          success: false,
+          message: "Status tujuan tidak valid."
+        }, 400);
       }
 
-      // Endpoint tidak ditemukan
-      return json({
-        success: false,
-        message: "Endpoint tidak ditemukan"
-      }, 404);
+      const result = await env.DB.prepare(`
+        UPDATE orders
+        SET order_status = ?,
+            updated_at = datetime('now')
+        WHERE id = ?
+          AND order_status = ?
+          AND payment_status = 'paid'
+      `).bind(
+        newStatus,
+        orderId,
+        previousStatus
+      ).run();
 
-    } catch (error) {
-      console.error("API error:", error);
+      if (!result.meta.changes) {
+        return json({
+          success: false,
+          message: "Status pesanan tidak sesuai atau pesanan tidak ditemukan."
+        }, 409);
+      }
 
       return json({
-        success: false,
-        message:
-          "Terjadi kesalahan pada server. Periksa log Worker."
-      }, 500);
+        success: true,
+        message: newStatus === "delivering"
+          ? "Pesanan sekarang sedang diantar."
+          : "Pesanan berhasil diselesaikan.",
+        order_status: newStatus
+      });
     }
+
+    // Endpoint tidak ditemukan
+    return json({
+      success: false,
+      message: "Endpoint tidak ditemukan"
+    }, 404);
+
+  } catch (error) {
+    console.error("API ERROR DETAIL:", {
+      method,
+      path,
+      message: error?.message || String(error),
+      stack: error?.stack || "Stack trace tidak tersedia"
+    });
+
+    return json({
+      success: false,
+      message: "Terjadi kesalahan pada server. Periksa log Worker."
+    }, 500);
+  }
   }
 };
