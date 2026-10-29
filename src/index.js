@@ -503,6 +503,192 @@ export default {
           message: "Logout berhasil"
         });
       }
+
+    
+      // Checkout pelanggan: membuat pesanan baru
+      if (path === "/api/orders" && method === "POST") {
+        const body = await readJson(request);
+
+        if (!validCustomer(body)) {
+          return json({
+            success: false,
+            message: "Data pelanggan atau daftar produk tidak valid"
+          }, 400);
+        }
+
+        // Gabungkan produk yang sama.
+        const quantities = new Map();
+
+        for (const item of body.items) {
+          const id = Number(item.product_id);
+          const quantity = Number(item.quantity);
+          const combined = (quantities.get(id) || 0) + quantity;
+
+          if (combined > 1000) {
+            return json({
+              success: false,
+              message: "Jumlah produk terlalu banyak"
+            }, 400);
+          }
+
+          quantities.set(id, combined);
+        }
+
+        const items = [];
+        let total = 0;
+
+        // Ambil harga dan stok dari database, bukan browser.
+        for (const [productId, quantity] of quantities) {
+          const product = await env.DB.prepare(`
+            SELECT id, name, price, stock
+            FROM products
+            WHERE id = ? AND is_active = 1
+          `).bind(productId).first();
+
+          if (!product) {
+            return json({
+              success: false,
+              message: `Produk ID ${productId} tidak tersedia`
+            }, 400);
+          }
+
+          if (product.stock < quantity) {
+            return json({
+              success: false,
+              message: `Stok ${product.name} tidak mencukupi`
+            }, 409);
+          }
+
+          const subtotal = product.price * quantity;
+
+          if (
+            !Number.isSafeInteger(subtotal) ||
+            !Number.isSafeInteger(total + subtotal)
+          ) {
+            return json({
+              success: false,
+              message: "Total pesanan terlalu besar"
+            }, 400);
+          }
+
+          total += subtotal;
+
+          items.push({
+            product_id: product.id,
+            product_name: product.name,
+            unit_price: product.price,
+            quantity,
+            subtotal
+          });
+        }
+
+        const orderCode = makeOrderCode();
+        const accessToken = randomHex(32);
+        const accessTokenHash = await sha256(accessToken);
+
+        // Pesanan hanya dibuat jika semua stok masih mencukupi.
+        const stockConditions = items.map(() => `
+          AND EXISTS (
+            SELECT 1 FROM products
+            WHERE id = ? AND is_active = 1 AND stock >= ?
+          )
+        `).join("");
+
+        const insertOrder = env.DB.prepare(`
+          INSERT INTO orders (
+            order_code, access_token_hash,
+            customer_name, customer_phone,
+            customer_address, customer_note,
+            total_amount, order_status, payment_status
+          )
+          SELECT ?, ?, ?, ?, ?, ?, ?,
+                 'pending_payment', 'unpaid'
+          WHERE 1 = 1
+          ${stockConditions}
+        `).bind(
+          orderCode,
+          accessTokenHash,
+          body.customer_name.trim(),
+          body.customer_phone.trim(),
+          body.customer_address.trim(),
+          body.customer_note?.trim() || null,
+          total,
+          ...items.flatMap(item => [
+            item.product_id,
+            item.quantity
+          ])
+        );
+
+        // Semua perubahan berikut dijalankan dalam satu batch.
+        const statements = [insertOrder];
+
+        for (const item of items) {
+          statements.push(
+            env.DB.prepare(`
+              UPDATE products
+              SET stock = stock - ?,
+                  updated_at = datetime('now')
+              WHERE id = ?
+                AND is_active = 1
+                AND stock >= ?
+                AND EXISTS (
+                  SELECT 1 FROM orders WHERE order_code = ?
+                )
+            `).bind(
+              item.quantity,
+              item.product_id,
+              item.quantity,
+              orderCode
+            )
+          );
+
+          statements.push(
+            env.DB.prepare(`
+              INSERT INTO order_items (
+                order_id, product_id, product_name,
+                unit_price, quantity, subtotal
+              )
+              SELECT
+                (SELECT id FROM orders WHERE order_code = ?),
+                ?, ?, ?, ?, ?
+              WHERE EXISTS (
+                SELECT 1 FROM orders WHERE order_code = ?
+              )
+            `).bind(
+              orderCode,
+              item.product_id,
+              item.product_name,
+              item.unit_price,
+              item.quantity,
+              item.subtotal,
+              orderCode
+            )
+          );
+        }
+
+        const results = await env.DB.batch(statements);
+
+        if (!results[0]?.meta?.changes) {
+          return json({
+            success: false,
+            message: "Stok baru saja berubah. Silakan checkout ulang."
+          }, 409);
+        }
+
+        return json({
+          success: true,
+          message: "Pesanan berhasil dibuat",
+          data: {
+            order_code: orderCode,
+            access_token: accessToken,
+            total_amount: total,
+            order_status: "pending_payment",
+            payment_status: "unpaid",
+            items
+          }
+        }, 201);
+      }
+
       // Pelanggan melihat status pesanan dengan kode dan token akses.
       const customerOrderMatch = path.match(
         /^\/api\/orders\/([A-Za-z0-9-]+)$/
