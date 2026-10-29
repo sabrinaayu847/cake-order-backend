@@ -326,7 +326,7 @@ async function cancelOrderAndRestoreStock(env, {
     originalPaymentStatus: order.payment_status
   };
 }
-        export default {
+export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -382,8 +382,7 @@ async function cancelOrderAndRestoreStock(env, {
         ) {
           return json({
             success: false,
-            message:
-              "Username harus 3–40 karakter dan password 12–128 karakter"
+            message: "Username harus 3–40 karakter dan password 12–128 karakter"
           }, 400);
         }
 
@@ -460,11 +459,8 @@ async function cancelOrderAndRestoreStock(env, {
         ).toISOString();
 
         await env.DB.prepare(`
-          INSERT INTO cashier_sessions (
-            cashier_id,
-            token_hash,
-            expires_at
-          )
+          INSERT INTO cashier_sessions
+            (cashier_id, token_hash, expires_at)
           VALUES (?, ?, ?)
         `).bind(
           cashier.id,
@@ -488,6 +484,7 @@ async function cancelOrderAndRestoreStock(env, {
       if (path === "/api/auth/logout" && method === "POST") {
         const authorization =
           request.headers.get("Authorization") || "";
+
         const match = authorization.match(/^Bearer\s+(.+)$/i);
 
         if (!match) {
@@ -511,15 +508,8 @@ async function cancelOrderAndRestoreStock(env, {
       // Katalog publik: hanya produk aktif
       if (path === "/api/products" && method === "GET") {
         const result = await env.DB.prepare(`
-          SELECT
-            id,
-            name,
-            description,
-            price,
-            image_url,
-            image_data,
-            category,
-            stock
+          SELECT id, name, description, price, image_url, image_data,
+                 category, stock
           FROM products
           WHERE is_active = 1
           ORDER BY id DESC
@@ -537,15 +527,8 @@ async function cancelOrderAndRestoreStock(env, {
 
       if (publicProductMatch && method === "GET") {
         const product = await env.DB.prepare(`
-          SELECT
-            id,
-            name,
-            description,
-            price,
-            image_url,
-            image_data,
-            category,
-            stock
+          SELECT id, name, description, price, image_url, image_data,
+                 category, stock
           FROM products
           WHERE id = ? AND is_active = 1
         `).bind(Number(publicProductMatch[1])).first();
@@ -562,30 +545,16 @@ async function cancelOrderAndRestoreStock(env, {
           data: product
         });
       }
-
-      // Semua endpoint katalog kasir memerlukan login
+            // Semua endpoint katalog kasir di bawah ini memerlukan login
       if (path.startsWith("/api/cashier/products")) {
         const auth = await requireCashier(request, env);
         if (auth.error) return auth.error;
 
         // Daftar semua produk, termasuk yang nonaktif
-        if (
-          path === "/api/cashier/products" &&
-          method === "GET"
-        ) {
+        if (path === "/api/cashier/products" && method === "GET") {
           const result = await env.DB.prepare(`
-            SELECT
-              id,
-              name,
-              description,
-              price,
-              image_url,
-              image_data,
-              category,
-              stock,
-              is_active,
-              created_at,
-              updated_at
+            SELECT id, name, description, price, image_url, image_data,
+                   category, stock, is_active, created_at, updated_at
             FROM products
             ORDER BY id DESC
           `).all();
@@ -597,33 +566,22 @@ async function cancelOrderAndRestoreStock(env, {
         }
 
         // Tambah produk
-        if (
-          path === "/api/cashier/products" &&
-          method === "POST"
-        ) {
+        if (path === "/api/cashier/products" && method === "POST") {
           const body = await readJson(request);
 
           if (!validProduct(body)) {
             return json({
               success: false,
-              message:
-                "Data produk tidak valid. Periksa nama, harga, dan stok."
+              message: "Data produk tidak valid. Periksa nama, harga, dan stok."
             }, 400);
           }
 
           const p = productValues(body);
 
           const result = await env.DB.prepare(`
-            INSERT INTO products (
-              name,
-              description,
-              price,
-              image_url,
-              image_data,
-              category,
-              stock,
-              is_active
-            )
+            INSERT INTO products
+              (name, description, price, image_url, image_data,
+               category, stock, is_active)
             VALUES (?, ?, ?, ?, ?, ?, ?, 1)
           `).bind(
             p.name,
@@ -655,8 +613,7 @@ async function cancelOrderAndRestoreStock(env, {
             if (!validProduct(body)) {
               return json({
                 success: false,
-                message:
-                  "Data produk tidak valid. Periksa nama, harga, dan stok."
+                message: "Data produk tidak valid. Periksa nama, harga, dan stok."
               }, 400);
             }
 
@@ -664,15 +621,9 @@ async function cancelOrderAndRestoreStock(env, {
 
             const result = await env.DB.prepare(`
               UPDATE products
-              SET
-                name = ?,
-                description = ?,
-                price = ?,
-                image_url = ?,
-                image_data = ?,
-                category = ?,
-                stock = ?,
-                updated_at = datetime('now')
+              SET name = ?, description = ?, price = ?,
+                  image_url = ?, image_data = ?, category = ?,
+                  stock = ?, updated_at = datetime('now')
               WHERE id = ?
             `).bind(
               p.name,
@@ -698,26 +649,20 @@ async function cancelOrderAndRestoreStock(env, {
             });
           }
 
-          // Aktifkan atau nonaktifkan produk
+          // Aktifkan/nonaktifkan produk
           if (method === "PATCH") {
             const body = await readJson(request);
 
-            if (
-              !body ||
-              ![0, 1].includes(body.is_active)
-            ) {
+            if (!body || ![0, 1].includes(body.is_active)) {
               return json({
                 success: false,
-                message:
-                  "is_active harus bernilai 1 (aktif) atau 0 (nonaktif)"
+                message: "is_active harus bernilai 1 (aktif) atau 0 (nonaktif)"
               }, 400);
             }
 
             const result = await env.DB.prepare(`
               UPDATE products
-              SET
-                is_active = ?,
-                updated_at = datetime('now')
+              SET is_active = ?, updated_at = datetime('now')
               WHERE id = ?
             `).bind(body.is_active, id).run();
 
@@ -748,15 +693,13 @@ async function cancelOrderAndRestoreStock(env, {
             if (used) {
               return json({
                 success: false,
-                message:
-                  "Produk sudah ada di riwayat pesanan. Nonaktifkan produk sebagai gantinya."
+                message: "Produk sudah ada di riwayat pesanan. Nonaktifkan produk sebagai gantinya."
               }, 409);
             }
 
-            const result = await env.DB.prepare(`
-              DELETE FROM products
-              WHERE id = ?
-            `).bind(id).run();
+            const result = await env.DB.prepare(
+              "DELETE FROM products WHERE id = ?"
+            ).bind(id).run();
 
             if (!result.meta.changes) {
               return json({
@@ -780,12 +723,11 @@ async function cancelOrderAndRestoreStock(env, {
         if (!validCustomer(body)) {
           return json({
             success: false,
-            message:
-              "Data pelanggan atau daftar produk tidak valid"
+            message: "Data pelanggan atau daftar produk tidak valid"
           }, 400);
         }
 
-        // Gabungkan produk yang sama agar tidak diproses berulang
+        // Gabungkan produk yang sama agar tidak diproses berulang.
         const quantities = new Map();
 
         for (const item of body.items) {
@@ -818,16 +760,14 @@ async function cancelOrderAndRestoreStock(env, {
           if (!product) {
             return json({
               success: false,
-              message:
-                `Produk ID ${productId} tidak tersedia`
+              message: `Produk ID ${productId} tidak tersedia`
             }, 400);
           }
 
           if (product.stock < quantity) {
             return json({
               success: false,
-              message:
-                `Stok ${product.name} tidak mencukupi`
+              message: `Stok ${product.name} tidak mencukupi`
             }, 409);
           }
 
@@ -839,7 +779,7 @@ async function cancelOrderAndRestoreStock(env, {
           ) {
             return json({
               success: false,
-              message: "Total pesanan terlalu besar"
+              message: "Total pesanan tidak valid"
             }, 400);
           }
 
@@ -848,28 +788,41 @@ async function cancelOrderAndRestoreStock(env, {
           items.push({
             product_id: product.id,
             product_name: product.name,
+            price: product.price,
+            quantity,
+            subtotal
+          });
+        }
+                  if (
+            !Number.isSafeInteger(subtotal) ||
+            !Number.isSafeInteger(total + subtotal)
+          ) {
+            return json({
+              success: false,
+              message: "Total pesanan terlalu besar"
+            }, 400);
+          }
+
+          total += subtotal;
+          items.push({
+            product_id: product.id,
+            product_name: product.name,
             unit_price: product.price,
             quantity,
             subtotal
           });
         }
-
-        const orderCode = makeOrderCode();
+              const orderCode = makeOrderCode();
         const accessToken = randomHex(32);
         const accessTokenHash = await sha256(accessToken);
 
-        // Buat pesanan terlebih dahulu
+        // Buat pesanan terlebih dahulu.
         const created = await env.DB.prepare(`
           INSERT INTO orders (
-            order_code,
-            access_token_hash,
-            customer_name,
-            customer_phone,
-            customer_address,
-            customer_note,
-            total_amount,
-            order_status,
-            payment_status
+            order_code, access_token_hash,
+            customer_name, customer_phone,
+            customer_address, customer_note,
+            total_amount, order_status, payment_status
           )
           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_payment', 'unpaid')
         `).bind(
@@ -886,16 +839,14 @@ async function cancelOrderAndRestoreStock(env, {
         const insertedItems = [];
 
         try {
-          // Periksa dan kurangi stok secara bersyarat
+          // Stok diperiksa dan dikurangi secara bersyarat.
+          // Jika gagal, pesanan dan perubahan stok dipulihkan.
           for (const item of items) {
             const stockResult = await env.DB.prepare(`
               UPDATE products
-              SET
-                stock = stock - ?,
-                updated_at = datetime('now')
-              WHERE id = ?
-                AND is_active = 1
-                AND stock >= ?
+              SET stock = stock - ?,
+                  updated_at = datetime('now')
+              WHERE id = ? AND is_active = 1 AND stock >= ?
             `).bind(
               item.quantity,
               item.product_id,
@@ -910,12 +861,8 @@ async function cancelOrderAndRestoreStock(env, {
 
             await env.DB.prepare(`
               INSERT INTO order_items (
-                order_id,
-                product_id,
-                product_name,
-                unit_price,
-                quantity,
-                subtotal
+                order_id, product_id, product_name,
+                unit_price, quantity, subtotal
               )
               VALUES (?, ?, ?, ?, ?, ?)
             `).bind(
@@ -931,9 +878,8 @@ async function cancelOrderAndRestoreStock(env, {
           for (const item of insertedItems) {
             await env.DB.prepare(`
               UPDATE products
-              SET
-                stock = stock + ?,
-                updated_at = datetime('now')
+              SET stock = stock + ?,
+                  updated_at = datetime('now')
               WHERE id = ?
             `).bind(
               item.quantity,
@@ -941,16 +887,14 @@ async function cancelOrderAndRestoreStock(env, {
             ).run();
           }
 
-          await env.DB.prepare(`
-            DELETE FROM orders
-            WHERE id = ?
-          `).bind(orderId).run();
+          await env.DB.prepare(
+            "DELETE FROM orders WHERE id = ?"
+          ).bind(orderId).run();
 
           if (error.message === "STOCK_CHANGED") {
             return json({
               success: false,
-              message:
-                "Stok baru saja berubah. Silakan checkout ulang."
+              message: "Stok baru saja berubah. Silakan checkout ulang."
             }, 409);
           }
 
@@ -970,7 +914,8 @@ async function cancelOrderAndRestoreStock(env, {
           }
         }, 201);
       }
-                  // Pelanggan melihat status pesanan dengan kode dan token akses
+
+      // Pelanggan melihat status pesanan dengan kode dan token akses.
       const customerOrderMatch = path.match(
         /^\/api\/orders\/([A-Za-z0-9-]+)$/
       );
@@ -1033,8 +978,7 @@ async function cancelOrderAndRestoreStock(env, {
 
           return json({
             success: true,
-            message:
-              "Laporan pembayaran dikirim. Menunggu verifikasi kasir.",
+            message: "Laporan pembayaran dikirim. Menunggu verifikasi kasir.",
             order_status: "awaiting_verification",
             payment_status: "reported_paid"
           });
@@ -1065,37 +1009,15 @@ async function cancelOrderAndRestoreStock(env, {
       }
 
       // Dashboard kasir: daftar pesanan
-      // PERBAIKAN: detail item produk disertakan dalam setiap pesanan
       if (path === "/api/cashier/orders" && method === "GET") {
         const auth = await requireCashier(request, env);
         if (auth.error) return auth.error;
 
         const result = await env.DB.prepare(`
-          SELECT
-            id,
-            order_code,
-            customer_name,
-            customer_phone,
-            customer_address,
-            customer_note,
-            total_amount,
-            order_status,
-            payment_status,
-            rejection_reason,
-            created_at,
-            updated_at,
-            (
-              SELECT json_group_array(
-                json_object(
-                  'product_name', oi.product_name,
-                  'unit_price', oi.unit_price,
-                  'quantity', oi.quantity,
-                  'subtotal', oi.subtotal
-                )
-              )
-              FROM order_items oi
-              WHERE oi.order_id = orders.id
-            ) AS items
+          SELECT id, order_code, customer_name, customer_phone,
+                 customer_address, customer_note, total_amount,
+                 order_status, payment_status, rejection_reason,
+                 created_at, updated_at
           FROM orders
           ORDER BY
             CASE order_status
@@ -1113,8 +1035,7 @@ async function cancelOrderAndRestoreStock(env, {
           data: result.results
         });
       }
-
-      // Detail item pesanan untuk kasir
+          // Detail item pesanan untuk kasir
       const cashierOrderItemsMatch = path.match(
         /^\/api\/cashier\/orders\/(\d+)\/items$/
       );
@@ -1124,11 +1045,7 @@ async function cancelOrderAndRestoreStock(env, {
         if (auth.error) return auth.error;
 
         const result = await env.DB.prepare(`
-          SELECT
-            product_name,
-            unit_price,
-            quantity,
-            subtotal
+          SELECT product_name, unit_price, quantity, subtotal
           FROM order_items
           WHERE order_id = ?
           ORDER BY id
@@ -1172,8 +1089,7 @@ async function cancelOrderAndRestoreStock(env, {
 
         return json({
           success: true,
-          message:
-            "Pembayaran dikonfirmasi. Pesanan sedang dibuat.",
+          message: "Pembayaran dikonfirmasi. Pesanan sedang dibuat.",
           order_status: "processing",
           payment_status: "paid"
         });
@@ -1198,8 +1114,7 @@ async function cancelOrderAndRestoreStock(env, {
         ) {
           return json({
             success: false,
-            message:
-              "Alasan penolakan wajib diisi (3–500 karakter)"
+            message: "Alasan penolakan wajib diisi (3–500 karakter)"
           }, 400);
         }
 
@@ -1272,7 +1187,7 @@ async function cancelOrderAndRestoreStock(env, {
         });
       }
 
-      // Kasir mengubah status pesanan menjadi diantar atau selesai
+      // Kasir mengubah status pesanan menjadi sedang diantar atau selesai
       const updateOrderStatusMatch = path.match(
         /^\/api\/cashier\/orders\/(\d+)\/status$/
       );
@@ -1290,63 +1205,68 @@ async function cancelOrderAndRestoreStock(env, {
           completed: "delivering"
         };
 
-       
-      const previousStatus = transitions[newStatus];
+        const previousStatus = transitions[newStatus];
 
-      if (!previousStatus) {
-        return json({
-          success: false,
-          message: "Status tujuan tidak valid."
-        }, 400);
+        if (!previousStatus) {
+          return json({
+            success: false,
+            message: "Status tujuan tidak valid."
+          }, 400);
+        }
+
+        try {
+          const result = await env.DB.prepare(`
+            UPDATE orders
+            SET order_status = ?,
+                updated_at = datetime('now')
+            WHERE id = ?
+              AND order_status = ?
+              AND payment_status = 'paid'
+          `).bind(
+            newStatus,
+            orderId,
+            previousStatus
+          ).run();
+
+          if (!result.meta || result.meta.changes === 0) {
+            return json({
+              success: false,
+              message: "Pesanan tidak ditemukan, belum dibayar, atau statusnya sudah berubah."
+            }, 409);
+          }
+
+          return json({
+            success: true,
+            message: newStatus === "delivering"
+              ? "Pesanan sekarang sedang diantar."
+              : "Pesanan berhasil diselesaikan.",
+            order_status: newStatus
+          });
+        } catch (error) {
+          console.error(
+            "Gagal mengubah status pesanan:",
+            error
+          );
+
+          return json({
+            success: false,
+            message: "Gagal memperbarui status pesanan di database."
+          }, 500);
+        }
       }
+          // Endpoint tidak ditemukan
+      return json({
+        success: false,
+        message: "Endpoint tidak ditemukan"
+      }, 404);
 
-      const result = await env.DB.prepare(`
-        UPDATE orders
-        SET order_status = ?,
-            updated_at = datetime('now')
-        WHERE id = ?
-          AND order_status = ?
-          AND payment_status = 'paid'
-      `).bind(
-        newStatus,
-        orderId,
-        previousStatus
-      ).run();
-
-      if (!result.meta.changes) {
-        return json({
-          success: false,
-          message: "Status pesanan tidak sesuai atau pesanan tidak ditemukan."
-        }, 409);
-      }
+    } catch (error) {
+      console.error("API error:", error);
 
       return json({
-        success: true,
-        message: newStatus === "delivering"
-          ? "Pesanan sekarang sedang diantar."
-          : "Pesanan berhasil diselesaikan.",
-        order_status: newStatus
-      });
+        success: false,
+        message: "Terjadi kesalahan pada server. Periksa log Worker."
+      }, 500);
     }
-
-    // Endpoint tidak ditemukan
-    return json({
-      success: false,
-      message: "Endpoint tidak ditemukan"
-    }, 404);
-
-  } catch (error) {
-    console.error("API ERROR DETAIL:", {
-      method,
-      path,
-      message: error?.message || String(error),
-      stack: error?.stack || "Stack trace tidak tersedia"
-    });
-
-    return json({
-      success: false,
-      message: "Terjadi kesalahan pada server. Periksa log Worker."
-    }, 500);
-  }
   }
 };
