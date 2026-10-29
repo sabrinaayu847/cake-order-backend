@@ -418,54 +418,81 @@ export default {
         }, 201);
       }
 
-      // Login kasir
+           // Login kasir
+      if (path === "/api/auth/login" && method === "POST") {
+        const body = await readJson(request);
 
-                  item.unit_price,
-              item.quantity,
-              item.subtotal
-            ).run();
-          }
-        } catch (error) {
-          for (const item of insertedItems) {
-            await env.DB.prepare(`
-              UPDATE products
-              SET stock = stock + ?,
-                  updated_at = datetime('now')
-              WHERE id = ?
-            `).bind(
-              item.quantity,
-              item.product_id
-            ).run();
-          }
-
-          await env.DB.prepare(
-            "DELETE FROM orders WHERE id = ?"
-          ).bind(orderId).run();
-
-          if (error.message === "STOCK_CHANGED") {
-            return json({
-              success: false,
-              message: "Stok baru saja berubah. Silakan checkout ulang."
-            }, 409);
-          }
-
-          throw error;
+        if (
+          !body ||
+          typeof body.username !== "string" ||
+          typeof body.password !== "string"
+        ) {
+          return json({
+            success: false,
+            message: "Username dan password wajib diisi"
+          }, 400);
         }
+
+        const cashier = await env.DB.prepare(`
+          SELECT id, username, password_hash, is_active
+          FROM cashiers
+          WHERE username = ?
+        `).bind(body.username).first();
+
+        if (
+          !cashier ||
+          cashier.is_active !== 1 ||
+          !(await verifyPassword(body.password, cashier.password_hash))
+        ) {
+          return json({
+            success: false,
+            message: "Username atau password salah"
+          }, 401);
+        }
+
+        const token = randomHex(32);
+        const tokenHash = await sha256(token);
+
+        await env.DB.prepare(`
+          INSERT INTO cashier_sessions
+            (cashier_id, token_hash, expires_at)
+          VALUES (?, ?, datetime('now', '+12 hours'))
+        `).bind(cashier.id, tokenHash).run();
 
         return json({
           success: true,
-          message: "Pesanan berhasil dibuat",
-          data: {
-            order_code: orderCode,
-            access_token: accessToken,
-            total_amount: total,
-            order_status: "pending_payment",
-            payment_status: "unpaid",
-            items
+          message: "Login berhasil",
+          token,
+          cashier: {
+            id: cashier.id,
+            username: cashier.username
           }
-        }, 201);
+        });
       }
 
+      // Logout kasir
+      if (path === "/api/auth/logout" && method === "POST") {
+        const authorization =
+          request.headers.get("Authorization") || "";
+        const match = authorization.match(/^Bearer\s+(.+)$/i);
+
+        if (!match) {
+          return json({
+            success: false,
+            message: "Token login diperlukan"
+          }, 401);
+        }
+
+        await env.DB.prepare(`
+          DELETE FROM cashier_sessions
+          WHERE token_hash = ?
+        `).bind(await sha256(match[1])).run();
+
+        return json({
+          success: true,
+          message: "Logout berhasil"
+        });
+      }
       // Pelanggan melihat status pesanan dengan kode dan token akses.
       const customerOrderMatch = path.match(
         /^\/api\/orders\/([A-Za-z0-9-]+)$/
