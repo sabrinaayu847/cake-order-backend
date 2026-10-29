@@ -793,16 +793,26 @@ export default {
         }
       }
 
-      // Dashboard kasir: daftar pesanan
+      
+      // Dashboard kasir: daftar pesanan beserta detail produk
       if (path === "/api/cashier/orders" && method === "GET") {
         const auth = await requireCashier(request, env);
         if (auth.error) return auth.error;
 
         const result = await env.DB.prepare(`
-          SELECT id, order_code, customer_name, customer_phone,
-                 customer_address, customer_note, total_amount,
-                 order_status, payment_status, rejection_reason,
-                 created_at, updated_at
+          SELECT
+            id,
+            order_code,
+            customer_name,
+            customer_phone,
+            customer_address,
+            customer_note,
+            total_amount,
+            order_status,
+            payment_status,
+            rejection_reason,
+            created_at,
+            updated_at
           FROM orders
           ORDER BY
             CASE order_status
@@ -815,9 +825,37 @@ export default {
           LIMIT 200
         `).all();
 
+        const orderList = result.results;
+
+        // Ambil item dari setiap pesanan.
+        // LEFT JOIN mempertahankan nama dan harga historis pesanan.
+        const ordersWithItems = await Promise.all(
+          orderList.map(async (order) => {
+            const itemResult = await env.DB.prepare(`
+              SELECT
+                oi.product_id,
+                oi.product_name,
+                oi.unit_price,
+                oi.quantity,
+                oi.subtotal,
+                p.image_url,
+                p.image_data
+              FROM order_items oi
+              LEFT JOIN products p ON p.id = oi.product_id
+              WHERE oi.order_id = ?
+              ORDER BY oi.id
+            `).bind(order.id).all();
+
+            return {
+              ...order,
+              items: itemResult.results
+            };
+          })
+        );
+
         return json({
           success: true,
-          data: result.results
+          data: ordersWithItems
         });
       }
 
