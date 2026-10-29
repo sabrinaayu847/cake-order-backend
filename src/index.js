@@ -3,7 +3,7 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Setup-Key",
   "Content-Type": "application/json; charset=utf-8"
-};
+}; 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
