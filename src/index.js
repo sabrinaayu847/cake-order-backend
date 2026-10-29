@@ -351,28 +351,27 @@ export default {
         });
       }
 
-      if (request.method === "GET" && path === "/api/products") {
-  try {
-    const { results } = await env.DB.prepare(`
-      SELECT *
-      FROM products
-      WHERE active = 1
-      ORDER BY id DESC
-    `).all();
+      if (path === "/api/products" && method === "GET") {
+  const result = await env.DB.prepare(`
+    SELECT
+      id,
+      name,
+      description,
+      price,
+      image_url,
+      image_data,
+      category,
+      stock
+    FROM products
+    WHERE is_active = 1
+    ORDER BY id DESC
+  `).all();
 
-    return json({
-      success: true,
-      data: results
-    });
-  } catch (error) {
-    return json({
-      success: false,
-      message: "Gagal memuat katalog",
-      error: error.message
-    }, 500);
-  }
+  return json({
+    success: true,
+    data: result.results
+  });
 }
-
       // Buat kasir pertama. Memerlukan secret Cloudflare.
       if (path === "/api/auth/setup" && method === "POST") {
         if (!env.CASHIER_SETUP_KEY) {
@@ -1255,7 +1254,7 @@ export default {
           message: "Metode permintaan tidak didukung."
         }, 405);
       }
-
+ 
       // Endpoint tidak ditemukan
       return json({
         success: false,
