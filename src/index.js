@@ -837,7 +837,6 @@ export default {
                 oi.product_name,
                 oi.unit_price,
                 oi.quantity,
-                oi.subtotal,
                 p.image_url,
                 p.image_data
               FROM order_items oi
