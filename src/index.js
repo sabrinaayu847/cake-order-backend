@@ -469,16 +469,6 @@ export default {
           }
         });
       }
-        return json({
-          success: true,
-          message: "Login berhasil",
-          token,
-          cashier: {
-            id: cashier.id,
-            username: cashier.username
-          }
-        });
-      }
 
       // Logout kasir
       if (path === "/api/auth/logout" && method === "POST") {
@@ -1055,6 +1045,193 @@ export default {
           success: true,
           data: result.results
         });
+      }
+
+      
+      // Dashboard kasir: daftar, tambah, edit, status, dan hapus produk
+      const cashierProductsMatch = path.match(
+        /^\/api\/cashier\/products(?:\/(\d+))?$/
+      );
+
+      if (cashierProductsMatch) {
+        const auth = await requireCashier(request, env);
+        if (auth.error) return auth.error;
+
+        const productId = cashierProductsMatch[1]
+          ? Number(cashierProductsMatch[1])
+          : null;
+
+        // Daftar semua produk, termasuk yang nonaktif
+        if (method === "GET" && productId === null) {
+          const result = await env.DB.prepare(`
+            SELECT id, name, description, price, image_url,
+                   image_data, category, stock, is_active
+            FROM products
+            ORDER BY id DESC
+          `).all();
+
+          return json({
+            success: true,
+            data: result.results
+          });
+        }
+
+        // Tambah produk
+        if (method === "POST" && productId === null) {
+          const body = await readJson(request);
+
+          if (!validProduct(body)) {
+            return json({
+              success: false,
+              message: "Data produk tidak valid."
+            }, 400);
+          }
+
+          const p = productValues(body);
+
+          const result = await env.DB.prepare(`
+            INSERT INTO products (
+              name, description, price, image_url, image_data,
+              category, stock, is_active, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))
+          `).bind(
+            p.name,
+            p.description,
+            p.price,
+            p.image_url,
+            p.image_data,
+            p.category,
+            p.stock
+          ).run();
+
+          return json({
+            success: true,
+            message: "Produk berhasil ditambahkan.",
+            data: {
+              id: result.meta.last_row_id
+            }
+          }, 201);
+        }
+
+        // Edit informasi produk
+        if (method === "PUT" && productId !== null) {
+          const body = await readJson(request);
+
+          if (!validProduct(body)) {
+            return json({
+              success: false,
+              message: "Data produk tidak valid."
+            }, 400);
+          }
+
+          const p = productValues(body);
+
+          const result = await env.DB.prepare(`
+            UPDATE products
+            SET name = ?,
+                description = ?,
+                price = ?,
+                image_url = ?,
+                image_data = ?,
+                category = ?,
+                stock = ?,
+                updated_at = datetime('now')
+            WHERE id = ?
+          `).bind(
+            p.name,
+            p.description,
+            p.price,
+            p.image_url,
+            p.image_data,
+            p.category,
+            p.stock,
+            productId
+          ).run();
+
+          if (!result.meta.changes) {
+            return json({
+              success: false,
+              message: "Produk tidak ditemukan."
+            }, 404);
+          }
+
+          return json({
+            success: true,
+            message: "Produk berhasil diperbarui."
+          });
+        }
+
+        // Aktifkan atau nonaktifkan produk
+        if (method === "PATCH" && productId !== null) {
+          const body = await readJson(request);
+
+          if (
+            !body ||
+            ![0, 1].includes(body.is_active)
+          ) {
+            return json({
+              success: false,
+              message: "Status produk tidak valid."
+            }, 400);
+          }
+
+          const result = await env.DB.prepare(`
+            UPDATE products
+            SET is_active = ?,
+                updated_at = datetime('now')
+            WHERE id = ?
+          `).bind(body.is_active, productId).run();
+
+          if (!result.meta.changes) {
+            return json({
+              success: false,
+              message: "Produk tidak ditemukan."
+            }, 404);
+          }
+
+          return json({
+            success: true,
+            message: body.is_active
+              ? "Produk berhasil diaktifkan."
+              : "Produk berhasil dinonaktifkan."
+          });
+        }
+
+        // Hapus produk jika belum digunakan pada riwayat pesanan
+        if (method === "DELETE" && productId !== null) {
+          const result = await env.DB.prepare(`
+            DELETE FROM products
+            WHERE id = ?
+              AND NOT EXISTS (
+                SELECT 1 FROM order_items
+                WHERE order_items.product_id = products.id
+              )
+          `).bind(productId).run();
+
+          if (!result.meta.changes) {
+            const exists = await env.DB.prepare(
+              "SELECT id FROM products WHERE id = ?"
+            ).bind(productId).first();
+
+            return json({
+              success: false,
+              message: exists
+                ? "Produk sudah digunakan dalam riwayat pesanan dan tidak dapat dihapus."
+                : "Produk tidak ditemukan."
+            }, 409);
+          }
+
+          return json({
+            success: true,
+            message: "Produk berhasil dihapus."
+          });
+        }
+
+        return json({
+          success: false,
+          message: "Metode permintaan tidak didukung."
+        }, 405);
       }
 
       // Endpoint tidak ditemukan
