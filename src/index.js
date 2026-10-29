@@ -329,7 +329,7 @@ async function cancelOrderAndRestoreStock(env, {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const path = url.pathname;
+    const path = url.pathname.replace(/\/+$/, "") || "/";
     const method = request.method;
 
     if (method === "OPTIONS") {
@@ -350,6 +350,28 @@ export default {
           database: "connected"
         });
       }
+
+      if (request.method === "GET" && path === "/api/products") {
+  try {
+    const { results } = await env.DB.prepare(`
+      SELECT *
+      FROM products
+      WHERE active = 1
+      ORDER BY id DESC
+    `).all();
+
+    return json({
+      success: true,
+      data: results
+    });
+  } catch (error) {
+    return json({
+      success: false,
+      message: "Gagal memuat katalog",
+      error: error.message
+    }, 500);
+  }
+}
 
       // Buat kasir pertama. Memerlukan secret Cloudflare.
       if (path === "/api/auth/setup" && method === "POST") {
