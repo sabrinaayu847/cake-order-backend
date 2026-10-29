@@ -839,7 +839,7 @@ export default {
                 oi.quantity,
                 p.image_url,
                 p.image_data,
-                p.subtotal,
+                oi.subtotal
               FROM order_items oi
               LEFT JOIN products p ON p.id = oi.product_id
               WHERE oi.order_id = ?
