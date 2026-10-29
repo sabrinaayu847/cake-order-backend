@@ -1034,6 +1034,29 @@ export default {
         }
       }
 
+    
+      // Katalog produk untuk pelanggan
+      if (path === "/api/products" && method === "GET") {
+        const result = await env.DB.prepare(`
+          SELECT
+            id,
+            name,
+            description,
+            price,
+            image_url,
+            image_data,
+            category,
+            stock
+          FROM products
+          ORDER BY id DESC
+        `).all();
+
+        return json({
+          success: true,
+          data: result.results
+        });
+      }
+
       // Endpoint tidak ditemukan
       return json({
         success: false,
