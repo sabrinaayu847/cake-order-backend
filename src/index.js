@@ -1,0 +1,1348 @@
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Setup-Key",
+  "Content-Type": "application/json; charset=utf-8"
+};
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: corsHeaders
+  });
+}
+
+async function readJson(request) {
+  try {
+    return await request.json();
+  } catch {
+    return null;
+  }
+}
+
+function randomHex(bytes = 32) {
+  const data = crypto.getRandomValues(new Uint8Array(bytes));
+  return Array.from(data, b => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function sha256(value) {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), b =>
+    b.toString(16).padStart(2, "0")
+  ).join("");
+}
+
+async function hashPassword(password, salt = randomHex(16)) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(password),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+
+  const bits = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      salt: new TextEncoder().encode(salt),
+      iterations: 100000,
+      hash: "SHA-256"
+    },
+    key,
+    256
+  );
+
+  const hash = Array.from(new Uint8Array(bits), b =>
+    b.toString(16).padStart(2, "0")
+  ).join("");
+
+  return `${salt}:${hash}`;
+}
+
+async function verifyPassword(password, stored) {
+  const [salt, expected] = (stored || "").split(":");
+
+  if (!salt || !expected) return false;
+
+  const actual = await hashPassword(password, salt);
+  return actual === `${salt}:${expected}`;
+}
+
+async function requireCashier(request, env) {
+  const authorization = request.headers.get("Authorization") || "";
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+
+  if (!match) {
+    return {
+      error: json({
+        success: false,
+        message: "Silakan login sebagai kasir"
+      }, 401)
+    };
+  }
+
+  const tokenHash = await sha256(match[1]);
+
+  const cashier = await env.DB.prepare(`
+    SELECT c.id, c.username
+    FROM cashier_sessions s
+    JOIN cashiers c ON c.id = s.cashier_id
+    WHERE s.token_hash = ?
+      AND datetime(s.expires_at) > datetime('now')
+      AND c.is_active = 1
+  `).bind(tokenHash).first();
+
+  if (!cashier) {
+    return {
+      error: json({
+        success: false,
+        message: "Sesi tidak valid atau sudah berakhir"
+      }, 401)
+    };
+  }
+
+  return { cashier };
+}
+
+function validProduct(body) {
+  return body &&
+    typeof body.name === "string" &&
+    body.name.trim().length > 0 &&
+    body.name.trim().length <= 150 &&
+    Number.isSafeInteger(body.price) &&
+    body.price >= 0 &&
+    Number.isSafeInteger(body.stock) &&
+    body.stock >= 0 &&
+    body.stock <= 1000000 &&
+    (body.description == null ||
+      typeof body.description === "string") &&
+    (body.category == null ||
+      typeof body.category === "string") &&
+    (body.image_url == null ||
+      typeof body.image_url === "string") &&
+    (body.image_data == null ||
+      (typeof body.image_data === "string" &&
+       body.image_data.length <= 1500000));
+}
+
+function productValues(body) {
+  return {
+    name: body.name.trim(),
+    description: body.description || "",
+    price: body.price,
+    image_url: body.image_url || "",
+    image_data: body.image_data || "",
+    category: body.category || "",
+    stock: body.stock
+  };
+}
+
+function makeOrderCode() {
+  return "CK-" + Date.now().toString(36).toUpperCase() +
+    "-" + randomHex(3).toUpperCase();
+}
+
+function validCustomer(body) {
+  return body &&
+    typeof body.customer_name === "string" &&
+    body.customer_name.trim().length >= 2 &&
+    body.customer_name.trim().length <= 100 &&
+    typeof body.customer_phone === "string" &&
+    body.customer_phone.trim().length >= 8 &&
+    body.customer_phone.trim().length <= 25 &&
+    typeof body.customer_address === "string" &&
+    body.customer_address.trim().length >= 3 &&
+    body.customer_address.trim().length <= 500 &&
+    (body.customer_note == null ||
+      (typeof body.customer_note === "string" &&
+       body.customer_note.length <= 1000)) &&
+    Array.isArray(body.items) &&
+    body.items.length >= 1 &&
+    body.items.length <= 50 &&
+    body.items.every(item =>
+      item &&
+      Number.isSafeInteger(Number(item.product_id)) &&
+      Number(item.product_id) > 0 &&
+      Number.isSafeInteger(Number(item.quantity)) &&
+      Number(item.quantity) >= 1 &&
+      Number(item.quantity) <= 1000
+    );
+}
+
+async function getCustomerOrder(request, env, code) {
+  const authorization = request.headers.get("Authorization") || "";
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+
+  if (!match) {
+    return {
+      error: json({
+        success: false,
+        message: "Token akses pesanan diperlukan"
+      }, 401)
+    };
+  }
+
+  const tokenHash = await sha256(match[1]);
+
+  const order = await env.DB.prepare(`
+    SELECT id, order_code, customer_name, customer_phone,
+           customer_address, customer_note, total_amount,
+           order_status, payment_status, rejection_reason,
+           created_at, updated_at
+    FROM orders
+    WHERE order_code = ? AND access_token_hash = ?
+  `).bind(code, tokenHash).first();
+
+  if (!order) {
+    return {
+      error: json({
+        success: false,
+        message: "Pesanan tidak ditemukan atau token tidak valid"
+      }, 404)
+    };
+  }
+
+  return { order };
+}
+
+async function cancelOrderAndRestoreStock(env, {
+  orderId,
+  allowedStatuses,
+  paymentStatus,
+  rejectionReason,
+  cashierId
+}) {
+  const order = await env.DB.prepare(`
+    SELECT id, order_status, payment_status, stock_restored_at
+    FROM orders
+    WHERE id = ?
+  `).bind(orderId).first();
+
+  if (!order) {
+    return {
+      ok: false,
+      status: 404,
+      message: "Pesanan tidak ditemukan"
+    };
+  }
+
+  if (order.stock_restored_at != null) {
+    return {
+      ok: false,
+      status: 409,
+      message: "Stok pesanan sudah pernah dikembalikan"
+    };
+  }
+
+  const allowed = allowedStatuses.some(
+    status =>
+      order.order_status === status.order_status &&
+      order.payment_status === status.payment_status
+  );
+
+  if (!allowed) {
+    return {
+      ok: false,
+      status: 409,
+      message: "Pesanan sudah diproses atau tidak dapat dibatalkan"
+    };
+  }
+
+  const itemsResult = await env.DB.prepare(`
+    SELECT product_id, quantity
+    FROM order_items
+    WHERE order_id = ?
+  `).bind(orderId).all();
+
+  const restoreKey = `${Date.now()}-${randomHex(16)}`;
+
+  const updateOrder = env.DB.prepare(`
+    UPDATE orders
+    SET order_status = 'cancelled',
+        payment_status = COALESCE(?, payment_status),
+        rejection_reason = COALESCE(?, rejection_reason),
+        verified_by_cashier_id = COALESCE(?, verified_by_cashier_id),
+        verified_at = CASE
+          WHEN ? IS NOT NULL THEN datetime('now')
+          ELSE verified_at
+        END,
+        stock_restored_at = ?,
+        updated_at = datetime('now')
+    WHERE id = ?
+      AND stock_restored_at IS NULL
+      AND order_status = ?
+      AND payment_status = ?
+  `).bind(
+    paymentStatus ?? null,
+    rejectionReason ?? null,
+    cashierId ?? null,
+    rejectionReason ?? null,
+    restoreKey,
+    orderId,
+    order.order_status,
+    order.payment_status
+  );
+
+  const statements = [updateOrder];
+
+  for (const item of itemsResult.results) {
+    if (item.product_id != null) {
+      statements.push(
+        env.DB.prepare(`
+          UPDATE products
+          SET stock = stock + ?,
+              updated_at = datetime('now')
+          WHERE id = ?
+            AND EXISTS (
+              SELECT 1 FROM orders
+              WHERE id = ?
+                AND stock_restored_at = ?
+                AND order_status = 'cancelled'
+            )
+        `).bind(
+          item.quantity,
+          item.product_id,
+          orderId,
+          restoreKey
+        )
+      );
+    }
+  }
+
+  const results = await env.DB.batch(statements);
+
+  if (!results[0].meta.changes) {
+    return {
+      ok: false,
+      status: 409,
+      message: "Status pesanan berubah. Muat ulang halaman."
+    };
+  }
+
+  return {
+    ok: true,
+    message: "Pesanan dibatalkan dan stok dikembalikan",
+    originalPaymentStatus: order.payment_status
+  };
+}
+        export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const method = request.method;
+
+    if (method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: corsHeaders
+      });
+    }
+
+    try {
+      // Cek koneksi backend dan database
+      if (path === "/api/health" && method === "GET") {
+        await env.DB.prepare("SELECT 1").first();
+
+        return json({
+          success: true,
+          message: "Cake Order API aktif",
+          database: "connected"
+        });
+      }
+
+      // Buat kasir pertama. Memerlukan secret Cloudflare.
+      if (path === "/api/auth/setup" && method === "POST") {
+        if (!env.CASHIER_SETUP_KEY) {
+          return json({
+            success: false,
+            message: "Secret CASHIER_SETUP_KEY belum diatur"
+          }, 500);
+        }
+
+        if (
+          request.headers.get("X-Setup-Key") !==
+          env.CASHIER_SETUP_KEY
+        ) {
+          return json({
+            success: false,
+            message: "Kunci setup salah"
+          }, 403);
+        }
+
+        const body = await readJson(request);
+
+        if (
+          !body ||
+          typeof body.username !== "string" ||
+          !/^[a-zA-Z0-9_.-]{3,40}$/.test(body.username) ||
+          typeof body.password !== "string" ||
+          body.password.length < 12 ||
+          body.password.length > 128
+        ) {
+          return json({
+            success: false,
+            message:
+              "Username harus 3–40 karakter dan password 12–128 karakter"
+          }, 400);
+        }
+
+        const existing = await env.DB.prepare(
+          "SELECT COUNT(*) AS total FROM cashiers"
+        ).first();
+
+        if (existing.total > 0) {
+          return json({
+            success: false,
+            message: "Akun kasir pertama sudah dibuat"
+          }, 409);
+        }
+
+        const passwordHash = await hashPassword(body.password);
+
+        const result = await env.DB.prepare(`
+          INSERT INTO cashiers (username, password_hash)
+          SELECT ?, ?
+          WHERE NOT EXISTS (SELECT 1 FROM cashiers)
+        `).bind(body.username, passwordHash).run();
+
+        if (!result.meta.changes) {
+          return json({
+            success: false,
+            message: "Akun kasir sudah dibuat"
+          }, 409);
+        }
+
+        return json({
+          success: true,
+          message: "Akun kasir pertama berhasil dibuat"
+        }, 201);
+      }
+
+      // Login kasir
+      if (path === "/api/auth/login" && method === "POST") {
+        const body = await readJson(request);
+
+        if (
+          !body ||
+          typeof body.username !== "string" ||
+          typeof body.password !== "string"
+        ) {
+          return json({
+            success: false,
+            message: "Username dan password wajib diisi"
+          }, 400);
+        }
+
+        const cashier = await env.DB.prepare(`
+          SELECT id, username, password_hash
+          FROM cashiers
+          WHERE username = ? AND is_active = 1
+        `).bind(body.username).first();
+
+        if (
+          !cashier ||
+          !(await verifyPassword(
+            body.password,
+            cashier.password_hash
+          ))
+        ) {
+          return json({
+            success: false,
+            message: "Username atau password salah"
+          }, 401);
+        }
+
+        const token = randomHex(32);
+        const tokenHash = await sha256(token);
+        const expiresAt = new Date(
+          Date.now() + 8 * 60 * 60 * 1000
+        ).toISOString();
+
+        await env.DB.prepare(`
+          INSERT INTO cashier_sessions (
+            cashier_id,
+            token_hash,
+            expires_at
+          )
+          VALUES (?, ?, ?)
+        `).bind(
+          cashier.id,
+          tokenHash,
+          expiresAt
+        ).run();
+
+        return json({
+          success: true,
+          message: "Login berhasil",
+          token,
+          expiresAt,
+          cashier: {
+            id: cashier.id,
+            username: cashier.username
+          }
+        });
+      }
+
+      // Logout kasir
+      if (path === "/api/auth/logout" && method === "POST") {
+        const authorization =
+          request.headers.get("Authorization") || "";
+        const match = authorization.match(/^Bearer\s+(.+)$/i);
+
+        if (!match) {
+          return json({
+            success: false,
+            message: "Token tidak ditemukan"
+          }, 401);
+        }
+
+        await env.DB.prepare(`
+          DELETE FROM cashier_sessions
+          WHERE token_hash = ?
+        `).bind(await sha256(match[1])).run();
+
+        return json({
+          success: true,
+          message: "Logout berhasil"
+        });
+      }
+
+      // Katalog publik: hanya produk aktif
+      if (path === "/api/products" && method === "GET") {
+        const result = await env.DB.prepare(`
+          SELECT
+            id,
+            name,
+            description,
+            price,
+            image_url,
+            image_data,
+            category,
+            stock
+          FROM products
+          WHERE is_active = 1
+          ORDER BY id DESC
+        `).all();
+
+        return json({
+          success: true,
+          data: result.results
+        });
+      }
+
+      // Detail produk publik
+      const publicProductMatch =
+        path.match(/^\/api\/products\/(\d+)$/);
+
+      if (publicProductMatch && method === "GET") {
+        const product = await env.DB.prepare(`
+          SELECT
+            id,
+            name,
+            description,
+            price,
+            image_url,
+            image_data,
+            category,
+            stock
+          FROM products
+          WHERE id = ? AND is_active = 1
+        `).bind(Number(publicProductMatch[1])).first();
+
+        if (!product) {
+          return json({
+            success: false,
+            message: "Produk tidak ditemukan"
+          }, 404);
+        }
+
+        return json({
+          success: true,
+          data: product
+        });
+      }
+
+      // Semua endpoint katalog kasir memerlukan login
+      if (path.startsWith("/api/cashier/products")) {
+        const auth = await requireCashier(request, env);
+        if (auth.error) return auth.error;
+
+        // Daftar semua produk, termasuk yang nonaktif
+        if (
+          path === "/api/cashier/products" &&
+          method === "GET"
+        ) {
+          const result = await env.DB.prepare(`
+            SELECT
+              id,
+              name,
+              description,
+              price,
+              image_url,
+              image_data,
+              category,
+              stock,
+              is_active,
+              created_at,
+              updated_at
+            FROM products
+            ORDER BY id DESC
+          `).all();
+
+          return json({
+            success: true,
+            data: result.results
+          });
+        }
+
+        // Tambah produk
+        if (
+          path === "/api/cashier/products" &&
+          method === "POST"
+        ) {
+          const body = await readJson(request);
+
+          if (!validProduct(body)) {
+            return json({
+              success: false,
+              message:
+                "Data produk tidak valid. Periksa nama, harga, dan stok."
+            }, 400);
+          }
+
+          const p = productValues(body);
+
+          const result = await env.DB.prepare(`
+            INSERT INTO products (
+              name,
+              description,
+              price,
+              image_url,
+              image_data,
+              category,
+              stock,
+              is_active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+          `).bind(
+            p.name,
+            p.description,
+            p.price,
+            p.image_url,
+            p.image_data,
+            p.category,
+            p.stock
+          ).run();
+
+          return json({
+            success: true,
+            message: "Produk berhasil ditambahkan",
+            id: result.meta.last_row_id
+          }, 201);
+        }
+
+        const productMatch =
+          path.match(/^\/api\/cashier\/products\/(\d+)$/);
+
+        if (productMatch) {
+          const id = Number(productMatch[1]);
+
+          // Edit produk
+          if (method === "PUT") {
+            const body = await readJson(request);
+
+            if (!validProduct(body)) {
+              return json({
+                success: false,
+                message:
+                  "Data produk tidak valid. Periksa nama, harga, dan stok."
+              }, 400);
+            }
+
+            const p = productValues(body);
+
+            const result = await env.DB.prepare(`
+              UPDATE products
+              SET
+                name = ?,
+                description = ?,
+                price = ?,
+                image_url = ?,
+                image_data = ?,
+                category = ?,
+                stock = ?,
+                updated_at = datetime('now')
+              WHERE id = ?
+            `).bind(
+              p.name,
+              p.description,
+              p.price,
+              p.image_url,
+              p.image_data,
+              p.category,
+              p.stock,
+              id
+            ).run();
+
+            if (!result.meta.changes) {
+              return json({
+                success: false,
+                message: "Produk tidak ditemukan"
+              }, 404);
+            }
+
+            return json({
+              success: true,
+              message: "Produk berhasil diperbarui"
+            });
+          }
+
+          // Aktifkan atau nonaktifkan produk
+          if (method === "PATCH") {
+            const body = await readJson(request);
+
+            if (
+              !body ||
+              ![0, 1].includes(body.is_active)
+            ) {
+              return json({
+                success: false,
+                message:
+                  "is_active harus bernilai 1 (aktif) atau 0 (nonaktif)"
+              }, 400);
+            }
+
+            const result = await env.DB.prepare(`
+              UPDATE products
+              SET
+                is_active = ?,
+                updated_at = datetime('now')
+              WHERE id = ?
+            `).bind(body.is_active, id).run();
+
+            if (!result.meta.changes) {
+              return json({
+                success: false,
+                message: "Produk tidak ditemukan"
+              }, 404);
+            }
+
+            return json({
+              success: true,
+              message: body.is_active
+                ? "Produk diaktifkan"
+                : "Produk dinonaktifkan"
+            });
+          }
+
+          // Hapus permanen jika belum dipakai di riwayat pesanan
+          if (method === "DELETE") {
+            const used = await env.DB.prepare(`
+              SELECT 1
+              FROM order_items
+              WHERE product_id = ?
+              LIMIT 1
+            `).bind(id).first();
+
+            if (used) {
+              return json({
+                success: false,
+                message:
+                  "Produk sudah ada di riwayat pesanan. Nonaktifkan produk sebagai gantinya."
+              }, 409);
+            }
+
+            const result = await env.DB.prepare(`
+              DELETE FROM products
+              WHERE id = ?
+            `).bind(id).run();
+
+            if (!result.meta.changes) {
+              return json({
+                success: false,
+                message: "Produk tidak ditemukan"
+              }, 404);
+            }
+
+            return json({
+              success: true,
+              message: "Produk berhasil dihapus"
+            });
+          }
+        }
+      }
+
+      // Membuat pesanan dari katalog
+      if (path === "/api/orders" && method === "POST") {
+        const body = await readJson(request);
+
+        if (!validCustomer(body)) {
+          return json({
+            success: false,
+            message:
+              "Data pelanggan atau daftar produk tidak valid"
+          }, 400);
+        }
+
+        // Gabungkan produk yang sama agar tidak diproses berulang
+        const quantities = new Map();
+
+        for (const item of body.items) {
+          const id = Number(item.product_id);
+          const qty = Number(item.quantity);
+
+          quantities.set(
+            id,
+            (quantities.get(id) || 0) + qty
+          );
+        }
+
+        const items = [];
+        let total = 0;
+
+        for (const [productId, quantity] of quantities) {
+          if (quantity > 1000) {
+            return json({
+              success: false,
+              message: "Jumlah produk terlalu banyak"
+            }, 400);
+          }
+
+          const product = await env.DB.prepare(`
+            SELECT id, name, price, stock
+            FROM products
+            WHERE id = ? AND is_active = 1
+          `).bind(productId).first();
+
+          if (!product) {
+            return json({
+              success: false,
+              message:
+                `Produk ID ${productId} tidak tersedia`
+            }, 400);
+          }
+
+          if (product.stock < quantity) {
+            return json({
+              success: false,
+              message:
+                `Stok ${product.name} tidak mencukupi`
+            }, 409);
+          }
+
+          const subtotal = product.price * quantity;
+
+          if (
+            !Number.isSafeInteger(subtotal) ||
+            !Number.isSafeInteger(total + subtotal)
+          ) {
+            return json({
+              success: false,
+              message: "Total pesanan terlalu besar"
+            }, 400);
+          }
+
+          total += subtotal;
+
+          items.push({
+            product_id: product.id,
+            product_name: product.name,
+            unit_price: product.price,
+            quantity,
+            subtotal
+          });
+        }
+
+        const orderCode = makeOrderCode();
+        const accessToken = randomHex(32);
+        const accessTokenHash = await sha256(accessToken);
+
+        // Buat pesanan terlebih dahulu
+        const created = await env.DB.prepare(`
+          INSERT INTO orders (
+            order_code,
+            access_token_hash,
+            customer_name,
+            customer_phone,
+            customer_address,
+            customer_note,
+            total_amount,
+            order_status,
+            payment_status
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_payment', 'unpaid')
+        `).bind(
+          orderCode,
+          accessTokenHash,
+          body.customer_name.trim(),
+          body.customer_phone.trim(),
+          body.customer_address.trim(),
+          body.customer_note?.trim() || null,
+          total
+        ).run();
+
+        const orderId = created.meta.last_row_id;
+        const insertedItems = [];
+
+        try {
+          // Periksa dan kurangi stok secara bersyarat
+          for (const item of items) {
+            const stockResult = await env.DB.prepare(`
+              UPDATE products
+              SET
+                stock = stock - ?,
+                updated_at = datetime('now')
+              WHERE id = ?
+                AND is_active = 1
+                AND stock >= ?
+            `).bind(
+              item.quantity,
+              item.product_id,
+              item.quantity
+            ).run();
+
+            if (!stockResult.meta.changes) {
+              throw new Error("STOCK_CHANGED");
+            }
+
+            insertedItems.push(item);
+
+            await env.DB.prepare(`
+              INSERT INTO order_items (
+                order_id,
+                product_id,
+                product_name,
+                unit_price,
+                quantity,
+                subtotal
+              )
+              VALUES (?, ?, ?, ?, ?, ?)
+            `).bind(
+              orderId,
+              item.product_id,
+              item.product_name,
+              item.unit_price,
+              item.quantity,
+              item.subtotal
+            ).run();
+          }
+        } catch (error) {
+          for (const item of insertedItems) {
+            await env.DB.prepare(`
+              UPDATE products
+              SET
+                stock = stock + ?,
+                updated_at = datetime('now')
+              WHERE id = ?
+            `).bind(
+              item.quantity,
+              item.product_id
+            ).run();
+          }
+
+          await env.DB.prepare(`
+            DELETE FROM orders
+            WHERE id = ?
+          `).bind(orderId).run();
+
+          if (error.message === "STOCK_CHANGED") {
+            return json({
+              success: false,
+              message:
+                "Stok baru saja berubah. Silakan checkout ulang."
+            }, 409);
+          }
+
+          throw error;
+        }
+
+        return json({
+          success: true,
+          message: "Pesanan berhasil dibuat",
+          data: {
+            order_code: orderCode,
+            access_token: accessToken,
+            total_amount: total,
+            order_status: "pending_payment",
+            payment_status: "unpaid",
+            items
+          }
+        }, 201);
+      }
+                  // Pelanggan melihat status pesanan dengan kode dan token akses
+      const customerOrderMatch = path.match(
+        /^\/api\/orders\/([A-Za-z0-9-]+)$/
+      );
+
+      if (customerOrderMatch && method === "GET") {
+        const result = await getCustomerOrder(
+          request,
+          env,
+          customerOrderMatch[1]
+        );
+
+        if (result.error) return result.error;
+
+        const itemResult = await env.DB.prepare(`
+          SELECT product_name, unit_price, quantity, subtotal
+          FROM order_items
+          WHERE order_id = ?
+          ORDER BY id
+        `).bind(result.order.id).all();
+
+        return json({
+          success: true,
+          data: {
+            ...result.order,
+            items: itemResult.results
+          }
+        });
+      }
+
+      // Aksi pelanggan: lapor pembayaran atau batalkan pesanan
+      const customerActionMatch = path.match(
+        /^\/api\/orders\/([A-Za-z0-9-]+)\/(report-payment|cancel)$/
+      );
+
+      if (customerActionMatch && method === "POST") {
+        const [, code, action] = customerActionMatch;
+        const result = await getCustomerOrder(request, env, code);
+
+        if (result.error) return result.error;
+
+        const order = result.order;
+
+        if (action === "report-payment") {
+          const updated = await env.DB.prepare(`
+            UPDATE orders
+            SET order_status = 'awaiting_verification',
+                payment_status = 'reported_paid',
+                updated_at = datetime('now')
+            WHERE id = ?
+              AND order_status = 'pending_payment'
+              AND payment_status = 'unpaid'
+          `).bind(order.id).run();
+
+          if (!updated.meta.changes) {
+            return json({
+              success: false,
+              message: "Pesanan sudah diproses atau tidak dapat diubah"
+            }, 409);
+          }
+
+          return json({
+            success: true,
+            message:
+              "Laporan pembayaran dikirim. Menunggu verifikasi kasir.",
+            order_status: "awaiting_verification",
+            payment_status: "reported_paid"
+          });
+        }
+
+        if (action === "cancel") {
+          const cancelResult = await cancelOrderAndRestoreStock(env, {
+            orderId: order.id,
+            allowedStatuses: [{
+              order_status: "pending_payment",
+              payment_status: "unpaid"
+            }]
+          });
+
+          if (!cancelResult.ok) {
+            return json({
+              success: false,
+              message: cancelResult.message
+            }, cancelResult.status);
+          }
+
+          return json({
+            success: true,
+            message: "Pesanan berhasil dibatalkan",
+            order_status: "cancelled"
+          });
+        }
+      }
+
+      // Dashboard kasir: daftar pesanan
+      // PERBAIKAN: detail item produk disertakan dalam setiap pesanan
+      if (path === "/api/cashier/orders" && method === "GET") {
+        const auth = await requireCashier(request, env);
+        if (auth.error) return auth.error;
+
+        const result = await env.DB.prepare(`
+          SELECT
+            id,
+            order_code,
+            customer_name,
+            customer_phone,
+            customer_address,
+            customer_note,
+            total_amount,
+            order_status,
+            payment_status,
+            rejection_reason,
+            created_at,
+            updated_at,
+            (
+              SELECT json_group_array(
+                json_object(
+                  'product_name', oi.product_name,
+                  'unit_price', oi.unit_price,
+                  'quantity', oi.quantity,
+                  'subtotal', oi.subtotal
+                )
+              )
+              FROM order_items oi
+              WHERE oi.order_id = orders.id
+            ) AS items
+          FROM orders
+          ORDER BY
+            CASE order_status
+              WHEN 'awaiting_verification' THEN 0
+              WHEN 'pending_payment' THEN 1
+              WHEN 'processing' THEN 2
+              ELSE 3
+            END,
+            created_at DESC
+          LIMIT 200
+        `).all();
+
+        return json({
+          success: true,
+          data: result.results
+        });
+      }
+
+      // Detail item pesanan untuk kasir
+      const cashierOrderItemsMatch = path.match(
+        /^\/api\/cashier\/orders\/(\d+)\/items$/
+      );
+
+      if (cashierOrderItemsMatch && method === "GET") {
+        const auth = await requireCashier(request, env);
+        if (auth.error) return auth.error;
+
+        const result = await env.DB.prepare(`
+          SELECT
+            product_name,
+            unit_price,
+            quantity,
+            subtotal
+          FROM order_items
+          WHERE order_id = ?
+          ORDER BY id
+        `).bind(Number(cashierOrderItemsMatch[1])).all();
+
+        return json({
+          success: true,
+          data: result.results
+        });
+      }
+
+      // Kasir mengonfirmasi pembayaran
+      const verifyOrderMatch = path.match(
+        /^\/api\/cashier\/orders\/(\d+)\/verify$/
+      );
+
+      if (verifyOrderMatch && method === "PATCH") {
+        const auth = await requireCashier(request, env);
+        if (auth.error) return auth.error;
+
+        const orderId = Number(verifyOrderMatch[1]);
+
+        const updated = await env.DB.prepare(`
+          UPDATE orders
+          SET order_status = 'processing',
+              payment_status = 'paid',
+              verified_by_cashier_id = ?,
+              verified_at = datetime('now'),
+              updated_at = datetime('now')
+          WHERE id = ?
+            AND order_status = 'awaiting_verification'
+            AND payment_status = 'reported_paid'
+        `).bind(auth.cashier.id, orderId).run();
+
+        if (!updated.meta.changes) {
+          return json({
+            success: false,
+            message: "Pesanan tidak ditemukan atau sudah diproses"
+          }, 409);
+        }
+
+        return json({
+          success: true,
+          message:
+            "Pembayaran dikonfirmasi. Pesanan sedang dibuat.",
+          order_status: "processing",
+          payment_status: "paid"
+        });
+      }
+
+      // Kasir menolak pesanan dan mengembalikan stok
+      const rejectOrderMatch = path.match(
+        /^\/api\/cashier\/orders\/(\d+)\/reject$/
+      );
+
+      if (rejectOrderMatch && method === "PATCH") {
+        const auth = await requireCashier(request, env);
+        if (auth.error) return auth.error;
+
+        const body = await readJson(request);
+        const reason = body?.reason;
+
+        if (
+          typeof reason !== "string" ||
+          reason.trim().length < 3 ||
+          reason.trim().length > 500
+        ) {
+          return json({
+            success: false,
+            message:
+              "Alasan penolakan wajib diisi (3–500 karakter)"
+          }, 400);
+        }
+
+        const orderId = Number(rejectOrderMatch[1]);
+
+        const result = await cancelOrderAndRestoreStock(env, {
+          orderId,
+          allowedStatuses: [{
+            order_status: "awaiting_verification",
+            payment_status: "reported_paid"
+          }],
+          paymentStatus: "failed",
+          rejectionReason: reason.trim(),
+          cashierId: auth.cashier.id
+        });
+
+        if (!result.ok) {
+          return json({
+            success: false,
+            message: result.message
+          }, result.status);
+        }
+
+        return json({
+          success: true,
+          message: "Pesanan ditolak. Stok dikembalikan.",
+          order_status: "cancelled",
+          payment_status: "failed",
+          rejection_reason: reason.trim()
+        });
+      }
+
+      // Batalkan pesanan dari dashboard kasir
+      const cashierCancelMatch = path.match(
+        /^\/api\/cashier\/orders\/(\d+)\/cancel$/
+      );
+
+      if (cashierCancelMatch && method === "POST") {
+        const auth = await requireCashier(request, env);
+        if (auth.error) return auth.error;
+
+        const orderId = Number(cashierCancelMatch[1]);
+
+        const result = await cancelOrderAndRestoreStock(env, {
+          orderId,
+          allowedStatuses: [
+            {
+              order_status: "pending_payment",
+              payment_status: "unpaid"
+            },
+            {
+              order_status: "awaiting_verification",
+              payment_status: "reported_paid"
+            }
+          ]
+        });
+
+        if (!result.ok) {
+          return json({
+            success: false,
+            message: result.message
+          }, result.status);
+        }
+
+        return json({
+          success: true,
+          message: result.message,
+          order_status: "cancelled",
+          refund_review_required: true
+        });
+      }
+
+      // Kasir mengubah status pesanan menjadi diantar atau selesai
+      const updateOrderStatusMatch = path.match(
+        /^\/api\/cashier\/orders\/(\d+)\/status$/
+      );
+
+      if (updateOrderStatusMatch && method === "PATCH") {
+        const auth = await requireCashier(request, env);
+        if (auth.error) return auth.error;
+
+        const orderId = Number(updateOrderStatusMatch[1]);
+        const body = await readJson(request);
+        const newStatus = body?.order_status;
+
+        const transitions = {
+          delivering: "processing",
+          completed: "delivering"
+        };
+
+        const previousStatus = transitions[newStatus];
+
+        if (!previousStatus) {
+          return json({
+            success: false,
+            message: "Status tujuan tidak valid."
+          }, 400);
+        }
+
+        const result = await env.DB.prepare(`
+          UPDATE orders
+          SET order_status = ?,
+              updated_at = datetime('now')
+          WHERE id = ?
+            AND order_status = ?
+            AND payment_status = 'paid'
+        `).bind(
+          newStatus,
+          orderId,
+          previousStatus
+        ).run();
+
+        if (!result.meta.changes) {
+          return json({
+            success: false,
+            message:
+              "Status pesanan tidak sesuai atau pesanan tidak ditemukan."
+          }, 409);
+        }
+
+        return json({
+          success: true,
+          message: newStatus === "delivering"
+            ? "Pesanan sekarang sedang diantar."
+            : "Pesanan berhasil diselesaikan.",
+          order_status: newStatus
+        });
+      }
+
+      // Endpoint tidak ditemukan
+      return json({
+        success: false,
+        message: "Endpoint tidak ditemukan"
+      }, 404);
+
+    } catch (error) {
+      console.error("API error:", error);
+
+      return json({
+        success: false,
+        message:
+          "Terjadi kesalahan pada server. Periksa log Worker."
+      }, 500);
+    }
+  }
+};
