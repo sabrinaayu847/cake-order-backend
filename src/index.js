@@ -1260,12 +1260,15 @@ export default {
       }, 404);
 
     } catch (error) {
-      console.error("API error:", error);
+  console.error("API error:", error);
 
-      return json({
-        success: false,
-        message: "Terjadi kesalahan pada server. Periksa log Worker."
-      }, 500);
+  return json({
+    success: false,
+    message: "Terjadi kesalahan pada server.",
+    debug: error instanceof Error
+      ? error.message
+      : String(error)
+  }, 500);
     }
   }
 };
