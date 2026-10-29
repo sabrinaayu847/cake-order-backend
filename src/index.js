@@ -1298,9 +1298,72 @@ export default {
         return json({
           success: false,
           message: "Metode permintaan tidak didukung."
-        }, 405);
+    }, 405);
       }
- 
+
+      // Hapus satu riwayat pesanan yang sudah selesai atau dibatalkan
+const deleteOrderMatch = path.match(
+  /^\/api\/cashier\/orders\/(\d+)$/
+);
+
+if (deleteOrderMatch && method === "DELETE") {
+  const auth = await requireCashier(request, env);
+  if (auth.error) return auth.error;
+
+  const orderId = Number(deleteOrderMatch[1]);
+
+  const order = await env.DB.prepare(`
+    SELECT id, order_status
+    FROM orders
+    WHERE id = ?
+  `).bind(orderId).first();
+
+  if (!order) {
+    return json({
+      success: false,
+      message: "Pesanan tidak ditemukan."
+    }, 404);
+  }
+
+  if (!["completed", "cancelled"].includes(order.order_status)) {
+    return json({
+      success: false,
+      message: "Hanya pesanan selesai atau dibatalkan yang boleh dihapus."
+    }, 409);
+  }
+
+  const results = await env.DB.batch([
+    env.DB.prepare(`
+      DELETE FROM order_items
+      WHERE order_id = ?
+        AND EXISTS (
+          SELECT 1
+          FROM orders
+          WHERE id = ?
+            AND order_status IN ('completed', 'cancelled')
+        )
+    `).bind(orderId, orderId),
+
+    env.DB.prepare(`
+      DELETE FROM orders
+      WHERE id = ?
+        AND order_status IN ('completed', 'cancelled')
+    `).bind(orderId)
+  ]);
+
+  if (!results[1]?.meta?.changes) {
+    return json({
+      success: false,
+      message: "Pesanan tidak terhapus. Muat ulang halaman."
+    }, 409);
+  }
+
+  return json({
+    success: true,
+    message: "Riwayat pesanan berhasil dihapus."
+  });
+              }
+      
       // Endpoint tidak ditemukan
       return json({
         success: false,
