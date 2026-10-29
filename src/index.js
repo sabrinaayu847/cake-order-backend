@@ -418,7 +418,7 @@ export default {
         }, 201);
       }
 
-           // Login kasir
+      // Login kasir
       if (path === "/api/auth/login" && method === "POST") {
         const body = await readJson(request);
 
@@ -459,6 +459,16 @@ export default {
           VALUES (?, ?, datetime('now', '+12 hours'))
         `).bind(cashier.id, tokenHash).run();
 
+        return json({
+          success: true,
+          message: "Login berhasil",
+          token,
+          cashier: {
+            id: cashier.id,
+            username: cashier.username
+          }
+        });
+      }
         return json({
           success: true,
           message: "Login berhasil",
