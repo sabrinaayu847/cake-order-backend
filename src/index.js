@@ -715,11 +715,19 @@ export default {
         if (result.error) return result.error;
 
         const itemResult = await env.DB.prepare(`
-          SELECT product_name, unit_price, quantity, subtotal
-          FROM order_items
-          WHERE order_id = ?
-          ORDER BY id
-        `).bind(result.order.id).all();
+  SELECT
+    oi.product_id,
+    oi.product_name,
+    oi.unit_price,
+    oi.quantity,
+    oi.subtotal,
+    p.image_url,
+    p.image_data
+  FROM order_items oi
+  LEFT JOIN products p ON p.id = oi.product_id
+  WHERE oi.order_id = ?
+  ORDER BY oi.id
+`).bind(result.order.id).all();
 
         return json({
           success: true,
